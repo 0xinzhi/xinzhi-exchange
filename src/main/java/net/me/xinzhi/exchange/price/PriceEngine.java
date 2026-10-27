@@ -275,6 +275,7 @@ public final class PriceEngine {
                 fillAnchors(normal, normalDer, merged);
             }
             fillGeo(normal, normalDer, geoDefaults);
+            seedDrops(normal, normalDer, dropDefaults);          // ⭐ 掉落价先当种子，让下游配方能算出来
             buildAll(all, staged, tier, gate, normal, normalDer);
             if (staged) { normalStage1 = stage1Count; normalStage2 = stage2Count; }
 
@@ -302,6 +303,7 @@ public final class PriceEngine {
 
         // 1.8) 生物掉落物兜底价：只补「配方链算不通」的缺口
         fillDrops(normal, normalDer, dropDefaults);
+        dropCount = countByOrigin(normalDer, Origin.DROP);
 
         recipeCount = normal.size() - anchorCount - geoCount - dropCount;
         unpricedCount = countUnpriced(registry, normal);
@@ -324,6 +326,8 @@ public final class PriceEngine {
             Map<ItemKey, Derivation> sellDer = new HashMap<>(16384);
             fillAnchors(sell, sellDer, sellAnchors);
             fillGeo(sell, sellDer, geoDefaults);
+            seedDrops(sell, sellDer, dropDefaults);
+            for (Map.Entry<ItemKey, Double> e : forced.entrySet()) sell.putIfAbsent(e.getKey(), e.getValue());
             buildAll(all, staged, tier, gate, sell, sellDer);
             sell.replaceAll((k, v) -> {
                 Double n = normal.get(k);
@@ -480,6 +484,24 @@ public final class PriceEngine {
      * 生物掉落物兜底价：<b>只补空缺</b>（锚点 / 地理默认 / 配方推导已有的价一律不动）。
      * 见 {@link MobDropPrices} 的口径说明。
      */
+    /**
+     * 掉落兜底价「当种子」用：必须在配方推导<b>之前</b>就写进已定价集合。
+     * 道理：只能靠挖方块 / 打怪拿到的物品，没有配方能算出它的价，
+     * 如果等推导跑完再补，那些「拿它做材料」的物品就永远缺一条依赖边，链子断在那儿。
+     */
+    private void seedDrops(Map<ItemKey, Double> sink, Map<ItemKey, Derivation> der,
+                           Map<ItemKey, Double> dropDefaults) {
+        if (dropDefaults == null || dropDefaults.isEmpty()) return;
+        for (Map.Entry<ItemKey, Double> e : dropDefaults.entrySet()) {
+            ItemKey k = e.getKey();
+            Double v = e.getValue();
+            if (k == null || v == null || sink.containsKey(k)) continue;
+            if (!(v > 0) || Double.isNaN(v) || Double.isInfinite(v)) continue;
+            sink.put(k, v);
+            der.put(k, new Derivation(Origin.DROP, v, null));
+        }
+    }
+
     private void fillDrops(Map<ItemKey, Double> sink, Map<ItemKey, Derivation> der,
                            Map<ItemKey, Double> dropDefaults) {
         if (dropDefaults == null || dropDefaults.isEmpty()) return;
