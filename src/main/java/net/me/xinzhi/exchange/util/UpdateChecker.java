@@ -143,6 +143,12 @@ public final class UpdateChecker {
                 return;
             }
             if (self.getCanonicalFile().equals(next.getCanonicalFile())) return;
+            if (self.getPath().contains(" ") || next.getPath().contains(" ")) {
+                // cmd /c 的引号规则处理不了「带空格的中文路径」，宁可不动
+                plugin.getLogger().warning("[等价交换] 插件路径含空格，跳过自动安装，请手动把 "
+                        + next.getName() + " 覆盖到 " + self.getName());
+                return;
+            }
 
             File dir = next.getParentFile();
             boolean win = System.getProperty("os.name", "").toLowerCase().contains("win");
@@ -180,7 +186,7 @@ public final class UpdateChecker {
             + "set \"NEW=%~1\"\r\n"
             + "set \"OLD=%~2\"\r\n"
             + "echo [xzex-install] waiting for server to stop...\r\n"
-            + "timeout /t 6 /nobreak >nul\r\n"
+            + "ping -n 7 127.0.0.1 >nul\r\n"
             + "for /L %%i in (1,1,45) do (\r\n"
             + "  if not exist \"%NEW%\" goto end\r\n"
             + "  copy /Y \"%NEW%\" \"%OLD%\" >nul 2>&1\r\n"
@@ -189,7 +195,7 @@ public final class UpdateChecker {
             + "    echo [xzex-install] done, next start uses new jar\r\n"
             + "    goto end\r\n"
             + "  )\r\n"
-            + "  timeout /t 2 /nobreak >nul\r\n"
+            + "  ping -n 3 127.0.0.1 >nul\r\n"
             + ")\r\n"
             + "echo [xzex-install] failed, old jar kept\r\n"
             + ":end\r\n";
