@@ -108,12 +108,28 @@ public final class RecipeService {
     public CompletableFuture<Integer> scanAsync(Consumer<Integer> done, Runnable onFail) {
         if (scanning) return CompletableFuture.completedFuture(0);
         scanning = true;
-        List<SlimefunItem> items = ordered(collectAllSlimefunItems());
-        int warmed = RecipeExtractor.warmUp(items);
+        List<SlimefunItem> items;
+        try {
+            items = ordered(collectAllSlimefunItems());
+        } catch (Throwable t) {
+            plugin.getLogger().warning("[等价交换] 收集物品列表失败，退回未排序顺序: " + t);
+            items = collectAllSlimefunItems();
+        }
+        int warmed;
+        try {
+            warmed = RecipeExtractor.warmUp(items);
+        } catch (Throwable t) {
+            // 预热只是「提前触发静态初始化」的优化，失败绝不能挡住整轮扫描
+            plugin.getLogger().warning("[等价交换] 主线程预热失败（已忽略，继续扫描）: " + t);
+            warmed = 0;
+        }
         plugin.getLogger().info("[等价交换] 扫描开始：遍历 " + items.size()
-                + " 个 Slimefun 物品（主线程预热 " + warmed + " 个声明类）");
+                + " 个 Slimefun 物品（主线程预热 " + warmed + " 个声明类"
+                + (RecipeExtractor.broken() > 0 ? "，跳过 " + RecipeExtractor.broken() + " 个类加载失败的幽灵物品" : "")
+                + "）");
 
-        CompletableFuture<Integer> future = CompletableFuture.supplyAsync(() -> doScan(items));
+        final List<SlimefunItem> scanItems = items;
+        CompletableFuture<Integer> future = CompletableFuture.supplyAsync(() -> doScan(scanItems));
         future.whenComplete((count, err) -> {
             scanning = false;
             Bukkit.getScheduler().runTask(plugin, () -> {
@@ -253,6 +269,7 @@ public final class RecipeService {
         RecipeExtractor.setMultiblockEnabled(config.extractMultiblock);
         RecipeExtractor.setOwnRecipesEnabled(config.extractOwnRecipes);
 
+        int broken = 0;
         long start = System.currentTimeMillis();
         List<Recipe> all = new ArrayList<>(20000);
         Set<ItemKey> produced = new HashSet<>(8192);
@@ -260,15 +277,20 @@ public final class RecipeService {
 
         // ---- 第一遍：真实机器配方 ----
         for (SlimefunItem item : items) {
-            ItemKey key = ItemKey.of(item);
-            if (key == null) continue;
-            List<Recipe> got = RecipeExtractor.machineRecipes(item, key);
-            int prio = priorityOf(item);
-            for (Recipe r : got) r.setPriority(recipePriority(prio, r));
-            for (Recipe r : got) {
-                all.add(r);
-                produced.addAll(r.getOutputs().keySet());
-                bySource.merge(tag(r.getSource()), 1, Integer::sum);
+            try {
+                ItemKey key = ItemKey.of(item);
+                if (key == null) continue;
+                List<Recipe> got = RecipeExtractor.machineRecipes(item, key);
+                int prio = priorityOf(item);
+                for (Recipe r : got) r.setPriority(recipePriority(prio, r));
+                for (Recipe r : got) {
+                    all.add(r);
+                    produced.addAll(r.getOutputs().keySet());
+                    bySource.merge(tag(r.getSource()), 1, Integer::sum);
+                }
+            } catch (Throwable t) {
+                // 单个物品炸掉只丢它自己的配方，绝不能带崩整轮扫描
+                if (++broken == 1) plugin.getLogger().warning("[等价交换] 跳过无法读取的物品: " + t);
             }
         }
         int realCount = all.size();
@@ -278,17 +300,21 @@ public final class RecipeService {
         Map<String, Integer> ownByType = new TreeMap<>();
         if (RecipeExtractor.isOwnRecipesEnabled()) {
             for (SlimefunItem item : items) {
-                ItemKey key = ItemKey.of(item);
-                if (key == null) continue;
-                if (produced.contains(key)) continue;      // 已有真实配方 → 不补
-                Recipe r = RecipeExtractor.ownRecipe(item, key);
-                if (r == null) continue;
-                r.setPriority(recipePriority(priorityOf(item), r));
-                all.add(r);
-                produced.add(key);
-                ownCount++;
-                bySource.merge(tag(r.getSource()), 1, Integer::sum);
-                ownByType.merge(tag(r.getSource()), 1, Integer::sum);
+                try {
+                    ItemKey key = ItemKey.of(item);
+                    if (key == null) continue;
+                    if (produced.contains(key)) continue;      // 已有真实配方 → 不补
+                    Recipe r = RecipeExtractor.ownRecipe(item, key);
+                    if (r == null) continue;
+                    r.setPriority(recipePriority(priorityOf(item), r));
+                    all.add(r);
+                    produced.add(key);
+                    ownCount++;
+                    bySource.merge(tag(r.getSource()), 1, Integer::sum);
+                    ownByType.merge(tag(r.getSource()), 1, Integer::sum);
+                } catch (Throwable t) {
+                    if (++broken == 1) plugin.getLogger().warning("[等价交换] 跳过无法读取的物品: " + t);
+                }
             }
         }
 
@@ -315,7 +341,8 @@ public final class RecipeService {
                 + " 条，兜底配方 " + ownCount + " 条，黑名单 " + black
                 + " 条，重复丢掉 " + dup + " 条（保留读取顺序更靠前的附属版本）"
                 + "，去自环 " + RecipeSanitizer.dropped()
-                + " 条，最终入库 " + added + " 条 / " + registry.machines().size()
+                + (broken > 0 ? " 条，跳过坏物品 " + broken + " 个" : "")
+                + "，最终入库 " + added + " 条 / " + registry.machines().size()
                 + " 台机器，耗时 " + ms + " ms");
         plugin.getLogger().info("[等价交换] 来源分布: " + bySource);
         writeReport(items.size(), realCount, ownCount, added, bySource, ownByType, ms);

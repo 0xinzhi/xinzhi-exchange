@@ -68,6 +68,8 @@ public final class RecipeExtractor {
     private static final String[] RECIPE_GETTERS =
             {"getRecipes", "getMachineRecipes", "getRecipeList"};
 
+    private static int broken = 0;
+
     private static volatile boolean multiblockEnabled = true;
     private static volatile boolean ownRecipesEnabled = true;
 
@@ -86,22 +88,36 @@ public final class RecipeExtractor {
         if (machines == null || machines.isEmpty()) return 0;
         if (!Bukkit.isPrimaryThread()) return 0;
         Set<Class<?>> done = new HashSet<>();
+        broken = 0;
         for (SlimefunItem machine : machines) {
             if (machine == null) continue;
-            for (String name : RECIPE_GETTERS) {
-                Method m;
-                try {
-                    m = machine.getClass().getMethod(name);
-                } catch (NoSuchMethodException | SecurityException ignored) {
-                    continue;
+            try {
+                for (String name : RECIPE_GETTERS) {
+                    Method m;
+                    try {
+                        m = machine.getClass().getMethod(name);
+                    } catch (NoSuchMethodException | SecurityException ignored) {
+                        continue;
+                    } catch (Throwable brokenClass) {
+                        // 「幽灵物品」：实例在 Slimefun 注册表里，但它的类按类名再也加载不回来
+                        // （实测：青衫科技未安装，却有 io.gitee...tsingshantechnology...StorageUnit 的实例），
+                        // 碰一下反射就 NoClassDefFoundError，必须整台跳过，否则整轮扫描直接崩掉。
+                        broken++;
+                        break;
+                    }
+                    if (!done.add(m.getDeclaringClass())) break;
+                    try { m.invoke(machine); } catch (Throwable ignored) {}
+                    break;
                 }
-                if (!done.add(m.getDeclaringClass())) break;
-                try { m.invoke(machine); } catch (Throwable ignored) {}
-                break;
+            } catch (Throwable brokenClass) {
+                broken++;
             }
         }
         return done.size();
     }
+
+    /** 上一轮预热里因为类加载失败被跳过的物品数（幽灵物品），供上层打日志。 */
+    public static int broken() { return broken; }
 
     // ============================================================
     // 第 1 腿 + 2 腿 + 4 腿：真实机器配方

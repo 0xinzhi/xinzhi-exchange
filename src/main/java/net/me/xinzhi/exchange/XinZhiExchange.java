@@ -39,6 +39,9 @@ public final class XinZhiExchange extends JavaPlugin implements SlimefunAddon {
             getLogger().severe("[等价交换] 初始化失败: " + t);
             t.printStackTrace();
         }
+
+        // 启动时异步查一次 GitHub Releases（配置 update.check / update.download）
+        net.me.xinzhi.exchange.util.UpdateChecker.start(this);
     }
 
     @Override

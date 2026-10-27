@@ -24,6 +24,7 @@ import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
 import org.bukkit.event.block.BlockPlaceEvent;
+import org.bukkit.event.inventory.InventoryAction;
 import org.bukkit.event.inventory.InventoryClickEvent;
 import org.bukkit.event.inventory.InventoryCloseEvent;
 import org.bukkit.event.inventory.InventoryDragEvent;
@@ -229,6 +230,7 @@ public final class TransporterMachine extends AbstractMachine {
                     show.setAmount(Math.max(1, Math.min(cur.getValue(), Math.max(1, show.getMaxStackSize()))));
                     inv.setItem(slot, show);
                     holder.prefilled.add(slot);   // 显示副本：关界面不能退给玩家（否则复制）
+                    holder.want.put(slot, Math.max(1, cur.getValue()));   // 真实设定数量，别被 maxStack 截断改写
                     continue;
                 }
             }
@@ -269,7 +271,8 @@ public final class TransporterMachine extends AbstractMachine {
             if (it == null || it.getType().isAir()) continue;
             ItemKey k = ItemKey.of(it);
             if (k == null) continue;
-            map.put(slot, k + "|" + Math.max(1, it.getAmount()));
+            int amount = Math.max(1, sh.want.getOrDefault(slot, it.getAmount()));
+            map.put(slot, k + "|" + amount);
             if (returnItems) {
                 inv.setItem(slot, null);
                 if (!prefilled && p != null) {
@@ -294,6 +297,8 @@ public final class TransporterMachine extends AbstractMachine {
         final int size;
         final Set<Integer> locked = new HashSet<>();
         final Set<Integer> prefilled = new HashSet<>();
+        /** 槽位 -> 玩家真实设定的投料数量（prefilled 格子的显示数量可能被 maxStack 截断） */
+        final Map<Integer, Integer> want = new HashMap<>();
         int sizeSaved;
         Inventory inv;
 
@@ -327,7 +332,21 @@ public final class TransporterMachine extends AbstractMachine {
             if (!(e.getInventory().getHolder() instanceof SettingHolder sh)) return;
             Player p = e.getWhoClicked() instanceof Player pl ? pl : null;
             int raw = e.getRawSlot();
-            if (raw < 0 || raw >= sh.size) return;   // 玩家背包里的操作不管
+
+            // 双击收集会把槽里的「显示副本」吸到光标 = 复制，整个界面禁用
+            if (e.getAction() == InventoryAction.COLLECT_TO_CURSOR) {
+                e.setCancelled(true);
+                return;
+            }
+            if (raw < 0) return;
+            if (raw >= sh.size) {
+                // 玩家背包区域：Shift 点击会把物品塞进界面、可能合并到显示副本上
+                if (e.isShiftClick()) {
+                    e.setCancelled(true);
+                    if (p != null) p.sendMessage("§7[运输机] 请把物品拖进界面、或拿在手上点格子；Shift 直塞会污染显示格");
+                }
+                return;
+            }
 
             if (sh.locked.contains(raw)) {
                 e.setCancelled(true);
@@ -335,23 +354,43 @@ public final class TransporterMachine extends AbstractMachine {
                 return;
             }
             if (sh.prefilled.contains(raw)) {
+                // 这一格是凭空造出来的副本：任何可能让它离开格子的操作先取消，再手动处理
+                e.setCancelled(true);
                 ItemStack hand = e.getCursor();
                 boolean holding = hand != null && !hand.getType().isAir();
                 if (!holding) {
-                    // 显示用的副本不能拿走（拿走等于刷物品）
-                    e.setCancelled(true);
                     if (e.isShiftClick()) {
                         // Shift+左键 = 清除这一格的投料记录
                         sh.prefilled.remove(raw);
+                        sh.want.remove(raw);
                         e.getInventory().setItem(raw, null);
                         if (p != null) p.sendMessage("§7[运输机] 已清除第 " + raw + " 槽的投料记录");
                         scheduleSave(sh, p);
                     } else if (p != null) {
-                        p.sendMessage("§7[运输机] 要改这一格，把新物品拿在手上点它；Shift+左键清除");
+                        p.sendMessage("§7[运输机] 手持要投的物品点这一格即可改写；Shift+左键清除");
                     }
                     return;
                 }
-                sh.prefilled.remove(raw);
+                // 手持物品 = 直接改写这一格的映射；物品留在手上（不消耗、不复制）
+                ItemKey k = ItemKey.of(hand);
+                ItemStack tpl = k == null ? null : k.toTemplate();
+                if (tpl == null) {
+                    if (p != null) p.sendMessage("§c[运输机] 这个物品不能作为投料");
+                    return;
+                }
+                int amount = Math.max(1, hand.getAmount());
+                int max = Math.max(1, tpl.getMaxStackSize());
+                ItemStack show = tpl.clone();
+                show.setAmount(Math.min(amount, max));
+                e.getInventory().setItem(raw, show);
+                sh.want.put(raw, amount);
+                if (p != null) {
+                    p.sendMessage("§a[运输机] 第 " + raw + " 槽 §7→ §f" + SynthesisMachine.shortName(k)
+                            + " §7×§f" + amount
+                            + (amount > max ? " §8(每次最多投 " + max + ")" : ""));
+                }
+                scheduleSave(sh, p);
+                return;
             }
             scheduleSave(sh, p);
         }
@@ -368,7 +407,14 @@ public final class TransporterMachine extends AbstractMachine {
                 }
             }
             for (int raw : e.getRawSlots()) {
-                if (raw < sh.size) sh.prefilled.remove(raw);
+                if (raw < sh.size && sh.prefilled.contains(raw)) {
+                    // 已设置的格子不接拖拽：拖进去会把显示副本合并/交换掉 = 复制
+                    e.setCancelled(true);
+                    if (p != null) {
+                        p.sendMessage("§7[运输机] 第 " + raw + " 槽已经设置过了：手持物品点它改写，Shift+左键清除");
+                    }
+                    return;
+                }
             }
             scheduleSave(sh, p);
         }

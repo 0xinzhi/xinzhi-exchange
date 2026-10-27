@@ -93,6 +93,7 @@ public final class ExchangeService {
         this.craftPicker = new CraftPickerGui(this, craftGui);
         this.planner = new CraftPlanner(engine, recipes.registry(), () -> manager.tradeMax());
         this.pricingGui = new PricingAdminGui(this);
+        loadManualRefreshStamp();
         INSTANCE = this;
     }
 
@@ -255,6 +256,55 @@ public final class ExchangeService {
                         + " 条），价表已按定型结果重建：有价 " + beforePriced + " → " + engine.pricedCount() + " 个");
             }, null);
         }, ticks);
+    }
+
+    // ============================================================
+    // 等价终端「刷新价表」的全服冷却（腐竹 2026-10-28：改成 2 小时、全服共用）
+    // ============================================================
+
+    private File refreshStampFile() { return new File(plugin.getDataFolder(), "refresh.yml"); }
+    /** 上一次手动刷新的时间戳（毫秒，0 = 从没刷过）；写盘，重启后仍生效 */
+    private long lastManualRefreshAt;
+
+    /** 距离下次可手动刷新还剩多少毫秒；0 = 现在就能刷 */
+    public long refreshCooldownLeft() {
+        long cd = Math.max(0, config.terminalRefreshCooldownSeconds) * 1000L;
+        if (cd <= 0) return 0L;
+        return Math.max(0L, lastManualRefreshAt + cd - System.currentTimeMillis());
+    }
+
+    /** 记一次手动刷新（全服共用 + 落盘） */
+    public void markManualRefresh() {
+        lastManualRefreshAt = System.currentTimeMillis();
+        try {
+            org.bukkit.configuration.file.YamlConfiguration y =
+                    new org.bukkit.configuration.file.YamlConfiguration();
+            y.set("last-manual-refresh", lastManualRefreshAt);
+            y.save(refreshStampFile());
+        } catch (Throwable t) {
+            plugin.getLogger().warning("[等价交换] 写 refresh.yml 失败: " + t);
+        }
+    }
+
+    private void loadManualRefreshStamp() {
+        try {
+            File f = refreshStampFile();
+            if (!f.isFile()) return;
+            org.bukkit.configuration.file.YamlConfiguration y =
+                    org.bukkit.configuration.file.YamlConfiguration.loadConfiguration(f);
+            lastManualRefreshAt = Math.max(0L, y.getLong("last-manual-refresh", 0L));
+        } catch (Throwable t) {
+            plugin.getLogger().warning("[等价交换] 读 refresh.yml 失败: " + t);
+        }
+    }
+
+    /** 把毫秒差写成「1 小时 23 分」这种给玩家看的字 */
+    public static String fmtCooldown(long ms) {
+        long sec = Math.max(0L, (ms + 999L) / 1000L);
+        long h = sec / 3600L, m = (sec % 3600L) / 60L, s = sec % 60L;
+        if (h > 0) return h + " 小时" + (m > 0 ? " " + m + " 分" : "");
+        if (m > 0) return m + " 分" + (s > 0 ? " " + s + " 秒" : "");
+        return s + " 秒";
     }
 
     /** 重建价表（配方库 / 定价表变了就调） */

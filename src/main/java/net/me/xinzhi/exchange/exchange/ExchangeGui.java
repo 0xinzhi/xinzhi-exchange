@@ -440,8 +440,24 @@ public final class ExchangeGui {
             case NAV_SORT -> open(p, st.page, st.sort.next(), st.keyword, st.mode, st.cap);
             case NAV_BALANCE -> { /* 信息格 */ }
             case NAV_REFRESH -> {
+                // 腐竹 2026-10-28：刷新价表改成管理员功能 + 全服 2 小时冷却
+                if (!p.hasPermission("xzex.admin") && !p.isOp()) {
+                    p.sendMessage("§c[等价交换] 刷新价表是管理员功能");
+                    open(p, st.page, st.sort, st.keyword, st.mode, st.cap);
+                    return;
+                }
                 ExchangeService svc = ExchangeService.get();
-                if (svc != null) svc.rebuildPrices();
+                long left = svc == null ? 0L : svc.refreshCooldownLeft();
+                if (left > 0) {
+                    p.sendMessage("§c[等价交换] 价表冷却中，还需 §f" + ExchangeService.fmtCooldown(left)
+                            + " §7（全服共用）");
+                    open(p, st.page, st.sort, st.keyword, st.mode, st.cap);
+                    return;
+                }
+                if (svc != null) {
+                    svc.rebuildPrices();
+                    svc.markManualRefresh();
+                }
                 p.sendMessage("§a[等价交换] 价表已重建");
                 open(p, st.page, st.sort, st.keyword, st.mode, st.cap);
             }
@@ -613,6 +629,12 @@ public final class ExchangeGui {
         return out;
     }
 
+    /** 「刷新价表」全服冷却长度的可读文本（0 = 不限制） */
+    private String cooldownLabel() {
+        int sec = plugin.getConfig().getInt("terminal.refresh-cooldown-seconds", 7200);
+        return sec <= 0 ? "不限制" : ExchangeService.fmtCooldown(sec * 1000L);
+    }
+
     private ItemStack navIcon(Player p, MenuState st, int index, int total) {
         return switch (index) {
             case NAV_PREV -> GuiItems.of(Material.ARROW, "§e上一页",
@@ -638,8 +660,21 @@ public final class ExchangeGui {
             case NAV_SORT -> GuiItems.of(Material.HOPPER, "§b排序: §f" + st.sort.label,
                     "§7点一下换一种排序");
             case NAV_BALANCE -> balance(p);
-            case NAV_REFRESH -> GuiItems.of(Material.EMERALD, "§a刷新价表",
-                    "§7重建价格后重新打开");
+            case NAV_REFRESH -> {
+                if (!p.hasPermission("xzex.admin") && !p.isOp()) {
+                    yield GuiItems.of(Material.EMERALD, "§a刷新价表",
+                            "§c需要管理员权限 §f xzex.admin");
+                }
+                ExchangeService svc = ExchangeService.get();
+                long left = svc == null ? 0L : svc.refreshCooldownLeft();
+                yield left > 0
+                        ? GuiItems.of(Material.EMERALD, "§7刷新价表",
+                            "§c冷却中 · 还需 §f" + ExchangeService.fmtCooldown(left),
+                            "§8全服共用，重启也不会清零")
+                        : GuiItems.of(Material.EMERALD, "§a刷新价表",
+                            "§7重建价格后重新打开（管理员）",
+                            "§8全服冷却 " + cooldownLabel());
+            }
             case NAV_MODE -> canViewAll(p)
                     ? GuiItems.of(Material.CHEST,
                         "§b视图: §f" + st.mode.label,

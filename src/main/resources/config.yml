@@ -130,6 +130,9 @@ ability:
 
 # ---- 等价终端分阶 ----
 terminal:
+  # 「刷新价表」按钮的全服冷却（秒，腐竹 2026-10-28：2 小时；0 = 不限制）
+  # 该按钮本身是管理员功能（权限 xzex.admin / op）
+  refresh-cooldown-seconds: 7200
   # 每把显示上限提升 1 点，花费多少 EMC
   upgrade:
     emc-per-cap: 1000
@@ -179,3 +182,14 @@ gui:
   # 已废弃：版面固定为「无 mod 45 物品 + 9 导航 = 54 格 / 装 mod 54 物品 + 9 导航 = 63 格」，
   # 跳页与数量都走弹窗（滑条 + 输入框）。这个键不再参与计算，保留只为老配置不报错。
   page-size: 45
+
+# ---- 自动更新 ----
+# 启动时向 GitHub Releases 查一次新版本（腐竹 2026-10-28）
+update:
+  # 关掉就不联网
+  check: true
+  # 仓库 owner/name
+  repo: 0xinzhi/xinzhi-exchange
+  # true = 查到新版顺手下载到 plugins/update/，重启服务器后生效。
+  # 默认 false 只写日志：绝不热替换正在运行的 jar（版本不配套会让服起不来）
+  download: false

@@ -129,6 +129,8 @@ public final class Config {
     public final boolean abilityAuraHitPlayers;
     /** 范围伤害道具：不打的实体类型（逗号或列表，如 ARMOR_STAND） */
     public final java.util.List<String> abilityAuraIgnoredEntities;
+    /** 等价终端「刷新价表」的全服冷却（秒；腐竹 2026-10-28：2 小时）。0 = 不限制 */
+    public final int terminalRefreshCooldownSeconds;
     /** 等价终端：每提升 1 点显示上限花费的 EMC */
     public final double terminalUpgradeEmcPerCap;
     /** 初级等价终端：初始显示上限 / 升级封顶 */
@@ -220,6 +222,8 @@ public final class Config {
         java.util.List<String> ignUp = new java.util.ArrayList<>();
         for (String s : ign) if (s != null && !s.isBlank()) ignUp.add(s.trim().toUpperCase(java.util.Locale.ROOT));
         this.abilityAuraIgnoredEntities = java.util.List.copyOf(ignUp);
+
+        this.terminalRefreshCooldownSeconds = Math.max(0, c.getInt("terminal.refresh-cooldown-seconds", 7200));
 
         this.terminalUpgradeEmcPerCap = Math.max(1.0, c.getDouble("terminal.upgrade.emc-per-cap", 1000.0));
         this.terminalBasicCap = Math.max(0.0, c.getDouble("terminal.basic.cap", 100.0));
