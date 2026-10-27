@@ -5,9 +5,17 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import org.bukkit.Bukkit;
+import org.bukkit.configuration.file.YamlConfiguration;
+import org.bukkit.entity.Player;
+import org.bukkit.event.EventHandler;
+import org.bukkit.event.Listener;
+import org.bukkit.event.player.PlayerJoinEvent;
 import org.bukkit.plugin.java.JavaPlugin;
 
 import java.io.File;
+import java.util.HashSet;
+import java.util.Set;
+import java.util.UUID;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.net.HttpURLConnection;
@@ -40,11 +48,22 @@ public final class UpdateChecker {
     /** 已下载待安装的新 jar；为 null 表示这轮没有更新。 */
     private static volatile File pendingJar;
 
+    /** 已知的新版本号（远端最新、且与当前不同）；为 null 表示没有待处理的新版。 */
+    private static volatile String pendingVersion;
+
+    /** 本轮已经提示过的玩家，避免每次进服都念一遍同一句。 */
+    private static final Set<UUID> notified = new HashSet<>();
+
     public static void start(JavaPlugin plugin) {
         try {
             if (!plugin.getConfig().getBoolean("update.check", true)) return;
             String repo = plugin.getConfig().getString("update.repo", "0xinzhi/xinzhi-exchange");
             boolean download = plugin.getConfig().getBoolean("update.download", false);
+            loadState(plugin);
+            // 进服提示一直挂着（配置 update.notify.on-join）：管理员上线时把「有新版」告诉他
+            if (plugin.getConfig().getBoolean("update.notify.on-join", true)) {
+                Bukkit.getPluginManager().registerEvents(new JoinNotice(), plugin);
+            }
             Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
                 try {
                     check(plugin, repo, download);
@@ -55,6 +74,89 @@ public final class UpdateChecker {
         } catch (Throwable t) {
             plugin.getLogger().fine("[等价交换] 更新检查未启动: " + t);
         }
+    }
+
+    // ---- 「有新版本」这件事要让服里的人知道（腐竹 m00733） ----
+
+    /**
+     * 在线提示：管理员立刻收到；配置 {@code update.notify.players: true} 时全服玩家也收到。
+     *
+     * <p>腐竹的原话是「怎么让其他玩家知道更新了提醒腐竹去更新呢」——所以默认只提醒
+     * 有权限的人（op 或 {@code xzex.update}），玩家广播默认关，免得每台服都被刷屏。
+     */
+    private static void announce(JavaPlugin plugin) {
+        String v = pendingVersion;
+        if (v == null) return;
+        boolean toPlayers = plugin.getConfig().getBoolean("update.notify.players", false);
+        boolean toAdmins = plugin.getConfig().getBoolean("update.notify.admins", true);
+        String cur = plugin.getPluginMeta().getVersion();
+        if (!toPlayers && !toAdmins) return;
+        try {
+            Bukkit.getScheduler().runTask(plugin, () -> {
+                for (Player p : Bukkit.getOnlinePlayers()) {
+                    boolean admin = p.isOp() || p.hasPermission("xzex.update");
+                    if (admin && toAdmins) {
+                        p.sendMessage("§e[等价交换] 服务端有新版本 §f" + v + "§e（当前 §f" + cur
+                                + "§e）。新版已备好，重启服务器后自动生效；急的话手动换 jar 也行。");
+                        notified.add(p.getUniqueId());
+                    } else if (toPlayers) {
+                        p.sendMessage("§e[等价交换] 服务器稍后会更新到 §f" + v
+                                + "§e，更新后部分物品的等价价格可能变化。");
+                        notified.add(p.getUniqueId());
+                    }
+                }
+            });
+        } catch (Throwable ignored) {}
+    }
+
+    /** 玩家进服时补一句（他不在线的时候发生的更新，就在他下次上线时告诉他）。 */
+    public static final class JoinNotice implements Listener {
+        @EventHandler
+        public void onJoin(PlayerJoinEvent e) {
+            Player p = e.getPlayer();
+            JavaPlugin plugin = JavaPlugin.getProvidingPlugin(UpdateChecker.class);
+            String v = pendingVersion;
+            if (v == null || plugin == null) return;
+            boolean admin = p.isOp() || p.hasPermission("xzex.update");
+            boolean toPlayers = plugin.getConfig().getBoolean("update.notify.players", false);
+            if (!admin && !toPlayers) return;
+            if (!notified.add(p.getUniqueId())) return;
+            String cur = plugin.getPluginMeta().getVersion();
+            // 进服提示晚 2 秒，别和登录那一屏文字抢
+            Bukkit.getScheduler().runTaskLater(plugin, () -> {
+                if (!p.isOnline()) return;
+                p.sendMessage(admin
+                        ? "§e[等价交换] 服务端有新版本 §f" + v + "§e（当前 §f" + cur + "§e），重启后自动生效。"
+                        : "§e[等价交换] 服务器稍后会更新到 §f" + v + "§e。");
+            }, 40L);
+        }
+    }
+
+    private static File stateFile(JavaPlugin plugin) {
+        return new File(plugin.getDataFolder(), "update-state.yml");
+    }
+
+    /** 把「待安装的新版号」落盘：重启后仍然知道有新版没装。 */
+    private static void saveState(JavaPlugin plugin, String version) {
+        try {
+            YamlConfiguration y = new YamlConfiguration();
+            y.set("pending-version", version);
+            y.save(stateFile(plugin));
+        } catch (Throwable ignored) {}
+    }
+
+    private static void loadState(JavaPlugin plugin) {
+        try {
+            File f = stateFile(plugin);
+            if (!f.isFile()) return;
+            String v = YamlConfiguration.loadConfiguration(f).getString("pending-version", null);
+            if (v == null || v.isEmpty()) return;
+            if (v.equalsIgnoreCase(plugin.getPluginMeta().getVersion())) {
+                saveState(plugin, null); // 已经装上了，清掉
+                return;
+            }
+            pendingVersion = v;
+        } catch (Throwable ignored) {}
     }
 
     private static void check(JavaPlugin plugin, String repo, boolean download) throws Exception {
@@ -80,8 +182,14 @@ public final class UpdateChecker {
         if (latest.isEmpty()) return;
         if (latest.equalsIgnoreCase(current)) {
             plugin.getLogger().info("[等价交换] 已是最新版本 " + current);
+            pendingVersion = null;
+            saveState(plugin, null);
             return;
         }
+        // 有新版本：先记下来（即使关掉了下载，也要让服里的人知道）
+        pendingVersion = latest;
+        saveState(plugin, latest);
+        announce(plugin);   // 在线的人马上知道，不必等下载完
 
         String url = null, name = null;
         JsonArray assets = root.has("assets") ? root.getAsJsonArray("assets") : null;

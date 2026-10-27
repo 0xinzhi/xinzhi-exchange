@@ -196,3 +196,11 @@ update:
   # true = 关服时再派脚本把 plugins/update 里那份覆盖到插件本体（jar 已解锁才动），
   # 下次启动即新版。脚本失败会保留旧 jar，服照常能起。Windows 用 cmd，Linux 用 sh。
   auto-install: false
+  # 有新版本时怎么让人知道（腐竹 m00733：怎么让其他玩家提醒服主去更新）
+  notify:
+    # 在线管理员（op 或 xzex.update）立刻收到聊天提示
+    admins: true
+    # 全服玩家也收到（可能刷屏，默认关）
+    players: false
+    # 管理员不在线的话，下次进服时提示一次
+    on-join: true
