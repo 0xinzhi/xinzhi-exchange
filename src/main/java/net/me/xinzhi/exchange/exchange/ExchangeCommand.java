@@ -322,6 +322,7 @@ public final class ExchangeCommand implements CommandExecutor, TabCompleter {
     private void info(CommandSender s) {
         PriceEngine e = svc.engine();
         s.sendMessage("§6===== 等价交换（独立版）=====");
+        s.sendMessage("§7版本: §f" + svc.pluginVersion());
         s.sendMessage("§7价表: §e" + e.pricedCount() + " §7个物品有价（锚点 §e"
                 + e.anchorCount() + " §7/ 地理默认 §e" + e.geoCount()
                   + " §7/ 掉落兜底 §e" + e.dropCount()

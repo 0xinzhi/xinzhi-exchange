@@ -120,6 +120,15 @@ public final class ExchangeService {
     public RecipeService recipes() { return recipes; }
     public RecipeRegistry registry() { return recipes.registry(); }
     public Config config() { return config; }
+
+    /** 插件版本（plugin.yml 里由 Maven 过滤进来的 project.version）—— 给 /xzex info 对账用 */
+    public String pluginVersion() {
+        try {
+            return plugin.getPluginMeta().getVersion();
+        } catch (Throwable t) {
+            return "?";
+        }
+    }
     public AbilityService abilities() { return abilities; }
 
     // ============================================================
