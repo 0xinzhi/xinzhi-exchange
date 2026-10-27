@@ -193,3 +193,6 @@ update:
   # true = 查到新版顺手下载到 plugins/update/，重启服务器后生效。
   # 默认 false 只写日志：绝不热替换正在运行的 jar（版本不配套会让服起不来）
   download: false
+  # true = 关服时再派脚本把 plugins/update 里那份覆盖到插件本体（jar 已解锁才动），
+  # 下次启动即新版。脚本失败会保留旧 jar，服照常能起。Windows 用 cmd，Linux 用 sh。
+  auto-install: false

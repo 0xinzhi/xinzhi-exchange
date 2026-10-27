@@ -51,6 +51,8 @@ public final class XinZhiExchange extends JavaPlugin implements SlimefunAddon {
             try { service.disable(); } catch (Throwable ignored) {}
             service = null;
         }
+        // 关服后才敢动插件自己的 jar：派脱离脚本，等 JVM 退出再覆盖（配置 update.auto-install）
+        try { net.me.xinzhi.exchange.util.UpdateChecker.installOnShutdown(this); } catch (Throwable ignored) {}
         instance = null;
     }
 
