@@ -1,0 +1,21 @@
+# 构建产物
+target/
+*.jar
+build.log
+
+# 本地 Maven 设置（含本机路径，勿提交）
+maven-settings.xml
+
+# IDE
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+.settings/
+.classpath
+.project
+
+# 系统
+.DS_Store
+Thumbs.db

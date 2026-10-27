@@ -1,0 +1,32 @@
+name: XinZhiExchange
+main: net.me.xinzhi.exchange.XinZhiExchange
+version: ${project.version}
+api-version: 1.21
+author: 0xinzhi
+description: 独立版等价交换（自带配方库 / 定价表 / 余额）
+depend:
+  - Slimefun
+
+commands:
+  xzex:
+    description: 等价交换（独立版）
+    usage: /xzex [info|price|top|scan|rebuild|reload|export|set|unset|balance|give|admin|menu|emc]
+    aliases: [exchangex, djjh]
+    permission: xzex.use
+
+permissions:
+  xzex.open:
+    description: 无参 /xzex 直接打开等价交换界面（管理员）
+    default: op
+  xzex.use:
+    description: 使用等价交换（打开兑换界面 / 查价）
+    default: true
+  xzex.viewall:
+    description: 直接浏览全部物品（全库清单 / 搜索 / top / roots）
+    default: op
+  xzex.admin:
+    description: 等价交换管理（重扫 / 重建 / 定价 / 余额）
+    default: op
+  xzex.ability.fly:
+    description: 保留飞行（退出功能道具后也不撤销飞行许可）
+    default: false
