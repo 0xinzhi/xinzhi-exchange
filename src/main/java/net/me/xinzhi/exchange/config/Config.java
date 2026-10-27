@@ -85,6 +85,34 @@ public final class Config {
      */
     public final double mobDropUnknownPrice;
 
+    // ---- 破坏方块概率掉落兜底价（腐竹 2026-10-28）----
+    /**
+     * 是否给「挖方块概率掉落」的物品补价。
+     *
+     * <p>来源是 RSC 子附属的 {@code items.yml}（{@code drop_from} / {@code drop_chance} /
+     * {@code drop_amount}），见 {@link net.me.xinzhi.exchange.price.BlockDropPrices}。
+     */
+    public final boolean blockDropPricing;
+    /**
+     * 能反复刷取的方块（挖了会掉回自身，玩家摆了再挖成本≈0）按概率分档：
+     * 概率 ≥ {@link #blockDropHighChance}% → {@link #blockDropHighEmc}；
+     * ≥ {@link #blockDropMidChance}% → {@link #blockDropMidEmc}；更低 → {@link #blockDropLowEmc}。
+     */
+    public final int blockDropHighChance;
+    public final double blockDropHighEmc;
+    public final int blockDropMidChance;
+    public final double blockDropMidEmc;
+    public final double blockDropLowEmc;
+    /**
+     * 不可再生方块（挖掉不会掉回自身、玩家也造不出来，如紫水晶母岩）的掉落价。
+     */
+    public final double blockDropNonRenewableEmc;
+    /**
+     * 额外算作「玩家能自己造出来 / 能反复刷」的方块（没有物品形态但原版能建，
+     * 例如下界传送门 —— 腐竹：「还有就是那个下界传送门算是可再生」）。写材质名。
+     */
+    public final java.util.List<String> blockDropRenewableBlocks;
+
     // ---- 卖价规则（腐竹 2026-10-18 第八轮：「只降卖价不降买价」） ----
     /** 压缩物品卖价封顶（>0 生效；0 = 关）。腐竹：卖价超过 100 就固定 100。 */
     public final double compressedSellCap;
@@ -192,6 +220,24 @@ public final class Config {
 
         this.mobDropPricing = c.getBoolean("price.mob-drop.enabled", true);
         this.mobDropUnknownPrice = Math.max(0.0, c.getDouble("price.mob-drop.unknown-emc", 60.0));
+
+        // 方块掉落兜底（腐竹 2026-10-28）：
+        // 「可重复的按概率划分，30%以上5emc，30以下15emc，5以下30emc。无法再生的资源按100emc。
+        //   还有就是那个下界传送门算是可再生。」
+        this.blockDropPricing = c.getBoolean("price.block-drop.enabled", true);
+        this.blockDropHighChance = Math.max(1, c.getInt("price.block-drop.high-chance", 30));
+        this.blockDropHighEmc = Math.max(0.0, c.getDouble("price.block-drop.high-emc", 5.0));
+        this.blockDropMidChance = Math.max(0, c.getInt("price.block-drop.mid-chance", 5));
+        this.blockDropMidEmc = Math.max(0.0, c.getDouble("price.block-drop.mid-emc", 15.0));
+        this.blockDropLowEmc = Math.max(0.0, c.getDouble("price.block-drop.low-emc", 30.0));
+        this.blockDropNonRenewableEmc = Math.max(0.0, c.getDouble("price.block-drop.non-renewable-emc", 100.0));
+        java.util.List<String> rb = c.getStringList("price.block-drop.renewable-blocks");
+        if (rb.isEmpty()) rb = java.util.List.of("NETHER_PORTAL");
+        java.util.List<String> rbUp = new java.util.ArrayList<>(rb.size());
+        for (String s : rb) {
+            if (s != null && !s.isBlank()) rbUp.add(s.trim().toUpperCase(java.util.Locale.ROOT));
+        }
+        this.blockDropRenewableBlocks = java.util.List.copyOf(rbUp);
 
         this.compressedSellCap = Math.max(0.0, c.getDouble("price.compressed-sell-cap", 100.0));
         java.util.List<String> ck = c.getStringList("price.compressed-keywords");

@@ -13,6 +13,7 @@ import net.me.xinzhi.exchange.ability.FlightTokenItem;
 import net.me.xinzhi.exchange.api.EmcRegistry;
 import net.me.xinzhi.exchange.core.ItemKey;
 import net.me.xinzhi.exchange.config.Config;
+import net.me.xinzhi.exchange.price.BlockDropPrices;
 import net.me.xinzhi.exchange.price.MachineTier;
 import net.me.xinzhi.exchange.price.MobDropPrices;
 import net.me.xinzhi.exchange.price.PriceBook;
@@ -314,7 +315,7 @@ public final class ExchangeService {
         try {
             book.applyEmbedded();       // 运行期注册的附属值也要生效（不必重读 prices.yml）
             engine.rebuild(recipes.registry(), book.anchors(), config.staged, tier,
-                    config.requireMachine ? this::isFreeMachine : null, geoDefaults(), mobDropDefaults(),
+                    config.requireMachine ? this::isFreeMachine : null, geoDefaults(), dropDefaults(),
                     new PriceEngine.SellRules(config.compressedSellCap, config.compressedKeywords,
                             config.generatorSellRate, config.generatorKeywords));
             manager.refreshCatalog();
@@ -391,6 +392,94 @@ public final class ExchangeService {
         } catch (Throwable ignored) {
         }
         return out;
+    }
+
+    /**
+     * 所有「掉落兜底价」合起来：生物掉落（{@link MobDropPrices}）+ 破坏方块概率掉落
+     * （{@link BlockDropPrices}）。同一个物品两边都给价时取更便宜的（更容易拿到的方式定价）。
+     */
+    private Map<ItemKey, Double> dropDefaults() {
+        Map<ItemKey, Double> merged = new LinkedHashMap<>();
+        Map<ItemKey, Double> mob = mobDropDefaults();
+        if (mob != null) merged.putAll(mob);
+        Map<ItemKey, Double> block = blockDropDefaults();
+        if (block != null) {
+            for (Map.Entry<ItemKey, Double> e : block.entrySet()) {
+                if (e.getKey() == null || e.getValue() == null) continue;
+                merged.merge(e.getKey(), e.getValue(), Math::min);
+            }
+        }
+        return merged.isEmpty() ? null : merged;
+    }
+
+    /**
+     * 破坏方块概率掉落的兜底价（腐竹 2026-10-28）：RSC 子附属的物品常常只有
+     * {@code items.yml} 里一句「挖某方块有概率掉」，没有配方 ⇒ 按配方链永远算不出价。
+     *
+     * <p>口径见 {@link BlockDropPrices#priceFor(int, boolean, BlockDropPrices.Rules)}：
+     * 能反复刷取的方块按概率分档（≥30% → 5 / ≥5% → 15 / 更低 → 30），
+     * 不可再生的按固定价（默认 100）。<b>只补空缺</b>。
+     * 关掉用 {@code price.block-drop.enabled: false}。
+     */
+    private Map<ItemKey, Double> blockDropDefaults() {
+        if (!config.blockDropPricing) return null;
+        try {
+            BlockDropPrices.Rules rules = new BlockDropPrices.Rules(
+                    config.blockDropHighChance, config.blockDropHighEmc,
+                    config.blockDropMidChance, config.blockDropMidEmc,
+                    config.blockDropLowEmc, config.blockDropNonRenewableEmc,
+                    new java.util.LinkedHashSet<>(config.blockDropRenewableBlocks));
+            List<BlockDropPrices.Entry> entries =
+                    BlockDropPrices.collect(plugin.getDataFolder().getParentFile(), rules);
+            writeBlockDropReport(entries);
+            if (entries.isEmpty()) {
+                plugin.getLogger().info("[等价交换] 方块掉落兜底价: 没读到 drop_from 配置（没装 RSC 或不涉及）");
+                return null;
+            }
+            Map<ItemKey, Double> out = BlockDropPrices.defaults(entries);
+            plugin.getLogger().info("[等价交换] 方块掉落兜底价: 配置 " + entries.size() + " 条 / 涉及物品 "
+                    + out.size() + " 个（只补配方算不出的缺口）");
+            return out;
+        } catch (Throwable t) {
+            plugin.getLogger().warning("[等价交换] 读取方块掉落配置失败（不影响其它定价）: " + t);
+            return null;
+        }
+    }
+
+    /** 把方块掉落表导成一份人看的清单（插件家目录 block-drop-prices.yml），方便腐竹对账 / 提意见。 */
+    private void writeBlockDropReport(List<BlockDropPrices.Entry> entries) {
+        try {
+            File dir = plugin.getDataFolder();
+            if (!dir.exists() && !dir.mkdirs()) return;
+            List<BlockDropPrices.Entry> sorted = new ArrayList<>(entries);
+            sorted.sort(Comparator.comparing(BlockDropPrices.Entry::addon, String.CASE_INSENSITIVE_ORDER)
+                    .thenComparing(BlockDropPrices.Entry::itemId, String.CASE_INSENSITIVE_ORDER));
+            StringBuilder sb = new StringBuilder(4096);
+            sb.append("# XinZhiExchange 破坏方块掉落兜底价表（自动生成，仅供查看）\n");
+            sb.append("# 口径（腐竹 2026-10-28）：可反复刷取的方块按概率 —— >=30% → 5 EMC / >=5% → 15 / 更低 → 30\n");
+            sb.append("# 不可再生（挖了不掉回自身、也造不出来）→ ")
+                    .append(Text.num(config.blockDropNonRenewableEmc)).append(" EMC\n");
+            sb.append("# 只补「配方链算不出价」的物品；已经有价的物品不受影响。想改价用 /xzex set\n");
+            String last = null;
+            for (BlockDropPrices.Entry e : sorted) {
+                if (!e.addon().equals(last)) {
+                    last = e.addon();
+                    sb.append('\n').append(last).append(":\n");
+                }
+                sb.append("  - ").append(e.itemId()).append("  # ").append(Text.plain(e.displayName()))
+                        .append(" · 挖 ").append(e.blockName())
+                        .append("（").append(e.renewable() ? "可再生" : "不可再生").append("）· ")
+                        .append(e.chance()).append("% × ").append(e.amount())
+                        .append(" → ").append(Text.num(e.price())).append(" EMC\n");
+            }
+            File out = new File(dir, "block-drop-prices.yml");
+            try (java.io.Writer w = new java.io.OutputStreamWriter(
+                    new java.io.FileOutputStream(out), java.nio.charset.StandardCharsets.UTF_8)) {
+                w.write(sb.toString());
+            }
+        } catch (Throwable ignored) {
+            // 报表只是给人看的，写不出来不影响定价
+        }
     }
 
     /**
