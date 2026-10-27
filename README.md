@@ -65,4 +65,4 @@ diag/               扫描诊断输出
 
 ## 许可
 
-见仓库内 LICENSE（未附带时默认保留所有权利，使用前请先联系作者）。
+本项目采用 **GNU General Public License v3.0**，全文见仓库内 [LICENSE](LICENSE)。
