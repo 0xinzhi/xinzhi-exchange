@@ -250,11 +250,23 @@ public final class UpdateChecker {
                 plugin.getLogger().warning("[等价交换] 找不到插件自己的 jar，跳过自动安装");
                 return;
             }
-            if (self.getCanonicalFile().equals(next.getCanonicalFile())) return;
-            if (self.getPath().contains(" ") || next.getPath().contains(" ")) {
+            // Paper 1.20.5+ 会把插件 jar remap 到 plugins/.paper-remapped/ 再从那里加载，
+            // 于是「自己 jar」的路径是那份副本。真正要换的是 plugins/<同名>.jar，
+            // 副本还得一起删掉 —— 否则下次启动 Paper 照样读旧副本，白换。
+            File target = self;
+            File staleRemapped = null;
+            File selfParent = self.getParentFile();
+            if (selfParent != null && ".paper-remapped".equalsIgnoreCase(selfParent.getName())
+                    && selfParent.getParentFile() != null
+                    && new File(selfParent.getParentFile(), self.getName()).isFile()) {
+                staleRemapped = self;
+                target = new File(selfParent.getParentFile(), self.getName());
+            }
+            if (target.getCanonicalFile().equals(next.getCanonicalFile())) return;
+            if (target.getPath().contains(" ") || next.getPath().contains(" ")) {
                 // cmd /c 的引号规则处理不了「带空格的中文路径」，宁可不动
                 plugin.getLogger().warning("[等价交换] 插件路径含空格，跳过自动安装，请手动把 "
-                        + next.getName() + " 覆盖到 " + self.getName());
+                        + next.getName() + " 覆盖到 " + target.getName());
                 return;
             }
 
@@ -264,16 +276,19 @@ public final class UpdateChecker {
             Files.write(script.toPath(), (win ? WIN_SCRIPT : UNIX_SCRIPT).getBytes(StandardCharsets.UTF_8));
 
             File log = new File(dir, "install.log");
+            String staleArg = staleRemapped == null ? "" : staleRemapped.getAbsolutePath();
             ProcessBuilder pb = win
                     ? new ProcessBuilder("cmd.exe", "/c", script.getAbsolutePath(),
-                            next.getAbsolutePath(), self.getAbsolutePath())
+                            next.getAbsolutePath(), target.getAbsolutePath(), staleArg)
                     : new ProcessBuilder("/bin/sh", script.getAbsolutePath(),
-                            next.getAbsolutePath(), self.getAbsolutePath());
+                            next.getAbsolutePath(), target.getAbsolutePath(), staleArg);
             pb.redirectErrorStream(true);
             pb.redirectOutput(ProcessBuilder.Redirect.appendTo(log));
             pb.start();
             plugin.getLogger().info("[等价交换] 已安排关服后替换插件 jar：" + next.getName()
-                    + " -> " + self.getName() + "（日志 plugins/update/install.log）");
+                    + " -> " + target.getName()
+                    + (staleRemapped == null ? "" : "（并清掉 Paper 的 remap 副本）")
+                    + "（日志 plugins/update/install.log）");
         } catch (Throwable t) {
             plugin.getLogger().warning("[等价交换] 安排自动安装失败（旧 jar 保留）: " + t);
         }
@@ -300,6 +315,7 @@ public final class UpdateChecker {
             + "  copy /Y \"%NEW%\" \"%OLD%\" >nul 2>&1\r\n"
             + "  if not errorlevel 1 (\r\n"
             + "    del \"%NEW%\" >nul 2>&1\r\n"
+            + "    if not \"%~3\"==\"\" del \"%~3\" >nul 2>&1\r\n"
             + "    echo [xzex-install] done, next start uses new jar\r\n"
             + "    goto end\r\n"
             + "  )\r\n"
@@ -316,7 +332,7 @@ public final class UpdateChecker {
             + "i=0\n"
             + "while [ $i -lt 45 ]; do\n"
             + "  if [ ! -f \"$NEW\" ]; then exit 0; fi\n"
-            + "  if cp -f \"$NEW\" \"$OLD\" 2>/dev/null; then rm -f \"$NEW\"; exit 0; fi\n"
+            + "  if cp -f \"$NEW\" \"$OLD\" 2>/dev/null; then rm -f \"$NEW\"; [ -n \"$3\" ] && rm -f \"$3\"; exit 0; fi\n"
             + "  i=$((i+1)); sleep 2\n"
             + "done\n"
             + "exit 1\n";
