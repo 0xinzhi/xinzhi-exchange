@@ -9,6 +9,7 @@ import io.github.thebusybiscuit.slimefun4.core.handlers.BlockPlaceHandler;
 import io.github.thebusybiscuit.slimefun4.libraries.dough.items.CustomItemStack;
 import me.mrCookieSlime.Slimefun.api.inventory.BlockMenu;
 import me.mrCookieSlime.Slimefun.api.inventory.BlockMenuPreset;
+import me.mrCookieSlime.Slimefun.api.item_transport.ItemTransportFlow;
 import net.me.xinzhi.exchange.XinZhiExchange;
 import net.me.xinzhi.exchange.core.ItemGuard;
 import net.me.xinzhi.exchange.core.ItemKey;
@@ -68,6 +69,13 @@ public final class TransporterMachine extends AbstractMachine {
     static final int INPUT_SLOTS = 45;
     /** 映射最多记到第 53 槽（上方机器若是 54 格，最后一行也要能设置 —— 腐竹 m00988 第 2 条） */
     static final int MAP_SLOTS = 54;
+
+    /** 0~44 的输入槽数组（物流取用；每次返回副本，别让人改到常量） */
+    private static final int[] SLOTS_0_44 = new int[INPUT_SLOTS];
+
+    static {
+        for (int i = 0; i < INPUT_SLOTS; i++) SLOTS_0_44[i] = i;
+    }
 
     /** 46 = 等价道具槽（腐竹 m01476：运输机买东西也要受显示上限约束），48/50/52 锁死 */
     private static final int OPEN_SETTING = 45, CAP = 46, BALANCE = 47, STATUS = 49, RUN_NOW = 51, REFRESH = 53;
@@ -691,4 +699,11 @@ public final class TransporterMachine extends AbstractMachine {
     static String fmt(double v) {
         return String.format(Locale.ROOT, "%,.2f", v);
     }
+
+    /** 物流接入（腐竹 2026-10-28）：0~44 是输入槽，允许其他附属往运输机里塞投料。 */
+    @Override
+    public int[] getSlotsAccessedByItemTransport(ItemTransportFlow flow) {
+        return flow == ItemTransportFlow.INSERT ? SLOTS_0_44.clone() : new int[0];
+    }
+
 }

@@ -8,6 +8,7 @@ import io.github.thebusybiscuit.slimefun4.core.handlers.BlockPlaceHandler;
 import io.github.thebusybiscuit.slimefun4.libraries.dough.items.CustomItemStack;
 import me.mrCookieSlime.Slimefun.api.inventory.BlockMenu;
 import me.mrCookieSlime.Slimefun.api.inventory.BlockMenuPreset;
+import me.mrCookieSlime.Slimefun.api.item_transport.ItemTransportFlow;
 import net.me.xinzhi.exchange.core.ItemGuard;
 import net.me.xinzhi.exchange.core.ItemKey;
 import net.me.xinzhi.exchange.exchange.ExchangeService;
@@ -305,4 +306,11 @@ public final class AutoBuyMachine extends AbstractMachine {
         all[all.length - 1] = CAP_SLOT;   // 等价道具掉出来
         return all;
     }
+
+    /** 物流接入（腐竹 2026-10-28）：右边 4 列是输出槽，其他附属的运输/物流设备可以从这里取货。 */
+    @Override
+    public int[] getSlotsAccessedByItemTransport(ItemTransportFlow flow) {
+        return flow == ItemTransportFlow.WITHDRAW ? OUTPUTS.clone() : new int[0];
+    }
+
 }

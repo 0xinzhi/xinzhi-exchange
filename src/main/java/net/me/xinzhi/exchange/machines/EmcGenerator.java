@@ -12,6 +12,7 @@ import io.github.thebusybiscuit.slimefun4.core.networks.energy.EnergyNetComponen
 import io.github.thebusybiscuit.slimefun4.libraries.dough.items.CustomItemStack;
 import me.mrCookieSlime.Slimefun.api.inventory.BlockMenu;
 import me.mrCookieSlime.Slimefun.api.inventory.BlockMenuPreset;
+import me.mrCookieSlime.Slimefun.api.item_transport.ItemTransportFlow;
 import net.me.xinzhi.exchange.core.ItemGuard;
 import net.me.xinzhi.exchange.core.ItemKey;
 import net.me.xinzhi.exchange.exchange.ExchangeService;
@@ -314,4 +315,11 @@ public final class EmcGenerator extends AbstractMachine implements EnergyNetProv
     protected int[] storageSlotsForDrop() {
         return INPUT;
     }
+
+    /** 物流接入（腐竹 2026-10-28）：0~17 空格是输入槽，允许其他附属往里运输燃料/物品。 */
+    @Override
+    public int[] getSlotsAccessedByItemTransport(ItemTransportFlow flow) {
+        return flow == ItemTransportFlow.INSERT ? INPUT.clone() : new int[0];
+    }
+
 }
