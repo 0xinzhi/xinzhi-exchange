@@ -186,6 +186,14 @@ public final class ExchangeGuiListener implements Listener {
             gui.openMaterialBuy(p, dh.target, dh.backPage, dh.backSort, dh.backKeyword, dh.backMode, dh.backCap);
             return;
         }
+        if (raw == ExchangeGui.SLOT_DETAIL_FAV) {
+            boolean on = gui.store().toggleFav(p.getUniqueId(), dh.target);
+            p.sendMessage(on
+                    ? "§a已收藏 §f" + dh.target.getDisplayName()
+                    : "§7已取消收藏 §f" + dh.target.getDisplayName());
+            gui.openDetail(p, dh.target, dh.backPage, dh.backSort, dh.backKeyword, dh.backMode, dh.backCap);
+            return;
+        }
         if (raw == ExchangeGui.SLOT_DETAIL_BACK) {
             gui.open(p, dh.backPage, dh.backSort, dh.backKeyword, dh.backMode, dh.backCap);
             return;

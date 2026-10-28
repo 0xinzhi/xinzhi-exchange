@@ -187,6 +187,36 @@ public final class ExchangeManager {
         return ExchangeResult.ok(amount, unit, total);
     }
 
+    /**
+     * 快捷换出（腐竹 2026-10-28：右键 = 买 64 次，不够 64 次就尽量多买）。
+     *
+     * <p>和 {@link #buy} 的区别：不因为「钱不够 / 格子不够」整笔失败，而是退到当前买得起的数量；
+     * 一个都买不起才报错。单笔上限与超额限制仍按原规则。
+     */
+    public ExchangeResult buyUpTo(Player player, ItemKey key, long want) {
+        if (player == null || key == null) return ExchangeResult.fail("参数错误");
+        if (want <= 0) return ExchangeResult.fail("数量必须大于 0");
+        if (overLimit(key)) return ExchangeResult.fail(limitMessage(key));
+        double unit = buyUnit(key);
+        if (!(unit > 0)) {
+            return ExchangeResult.fail("该物品没有价格（材料链算不通，也还没有手工价）");
+        }
+        ItemStack proto = key.toTemplate();
+        if (proto == null) return ExchangeResult.fail("无法生成该物品（附属可能已被卸载）");
+
+        int space = freeSpace(player, proto);
+        if (space <= 0) return ExchangeResult.fail("背包空间不足");
+        double bal = balance(player.getUniqueId());
+        long affordable = (long) Math.floor(bal / unit);
+        long can = Math.min(want, Math.min(space, affordable));
+        if (can > config.maxPerTransaction) can = config.maxPerTransaction;
+        if (can <= 0) {
+            return ExchangeResult.fail("价值不足（单价 " + Text.num(unit)
+                    + "，现有 " + Text.num(bal) + "）");
+        }
+        return buy(player, key, can);
+    }
+
     // ============================================================
     // 换入：物品 → 价值
     // ============================================================

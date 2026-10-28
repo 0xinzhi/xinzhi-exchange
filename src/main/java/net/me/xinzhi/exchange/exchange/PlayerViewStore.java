@@ -43,6 +43,8 @@ public final class PlayerViewStore {
 
     private static final class Entry {
         final LinkedHashSet<ItemKey> sold = new LinkedHashSet<>();
+        /** 收藏（腐竹 2026-10-28）：从自己卖过的清单里挑一部分常驻，排序「收藏」只看这些 */
+        final LinkedHashSet<ItemKey> fav = new LinkedHashSet<>();
         /** 玩家主动关掉了超级菜单（默认开）。存 false 才写盘，见 save() */
         boolean modOff;
     }
@@ -81,6 +83,36 @@ public final class PlayerViewStore {
         Entry e = data.get(id);
         if (e == null) return List.of();
         return new ArrayList<>(e.sold);
+    }
+
+    // ============================================================
+    // 收藏（腐竹 2026-10-28：「在收藏中购买可以省一步搜索的步骤」）
+    // ============================================================
+
+    public synchronized boolean fav(UUID id, ItemKey key) {
+        Entry e = data.get(id);
+        return e != null && key != null && e.fav.contains(key);
+    }
+
+    /** 返回切换后的状态：true = 现在已收藏 */
+    public synchronized boolean toggleFav(UUID id, ItemKey key) {
+        if (id == null || key == null) return false;
+        Entry e = entry(id);
+        boolean on;
+        if (e.fav.remove(key)) {
+            on = false;
+        } else {
+            e.fav.add(key);
+            on = true;
+        }
+        save();                       // 显式操作，立刻落盘
+        return on;
+    }
+
+    public synchronized List<ItemKey> favorites(UUID id) {
+        Entry e = data.get(id);
+        if (e == null) return List.of();
+        return new ArrayList<>(e.fav);
     }
 
     // ============================================================
@@ -141,11 +173,17 @@ public final class PlayerViewStore {
         for (Map.Entry<UUID, Entry> en : data.entrySet()) {
             Entry e = en.getValue();
             trim(e.sold);
+            trim(e.fav);
             String base = "players." + en.getKey();
             if (!e.sold.isEmpty()) {
                 List<String> l = new ArrayList<>(e.sold.size());
                 for (ItemKey k : e.sold) l.add(k.toString());
                 yml.set(base + ".sold", l);
+            }
+            if (!e.fav.isEmpty()) {
+                List<String> l = new ArrayList<>(e.fav.size());
+                for (ItemKey k : e.fav) l.add(k.toString());
+                yml.set(base + ".fav", l);
             }
             if (e.modOff) yml.set(base + ".super-menu", false);
         }
@@ -174,6 +212,7 @@ public final class PlayerViewStore {
                 int before = e.sold.size();
                 readInto(root.getStringList(key + ".preview"), e.sold);
                 migrated += e.sold.size() - before;
+                readInto(root.getStringList(key + ".fav"), e.fav);
                 e.modOff = !root.getBoolean(key + ".super-menu", true);
             }
             plugin.getLogger().info("[等价交换] 玩家清单已加载: " + data.size() + " 个玩家"

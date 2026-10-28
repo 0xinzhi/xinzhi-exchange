@@ -72,6 +72,7 @@ public final class ExchangeGui {
     public static final int DETAIL_INPUT_START = 18;   // 18..26
     public static final int SLOT_DETAIL_PRICE = 31;
     public static final int DETAIL_CAND_START = 36;    // 36..44
+    public static final int SLOT_DETAIL_FAV = 48;       // 收藏开关（腐竹 2026-10-28）
     public static final int SLOT_DETAIL_MATERIALS = 49;  // 材料抵扣换出（腐竹 2026-10-19）
     public static final int SLOT_DETAIL_BACK = 45;
     public static final int SLOT_DETAIL_CLOSE = 53;
@@ -83,8 +84,9 @@ public final class ExchangeGui {
         public Mode other() { return this == MINE ? SEARCH : MINE; }
     }
 
+    /** 腐竹 2026-10-28：排序只要三种 —— 低→高 / 高→低 / 收藏（收藏模式只列收藏过的） */
     public enum Sort {
-        PRICE_DESC("价格 高→低"), PRICE_ASC("价格 低→高"), NAME("名称 A→Z");
+        PRICE_ASC("价格 低→高"), PRICE_DESC("价格 高→低"), FAVORITE("收藏");
 
         public final String label;
         Sort(String label) { this.label = label; }
@@ -348,7 +350,15 @@ public final class ExchangeGui {
                 openDetail(p, key, st.page, st.sort, st.keyword, st.mode, st.cap);
                 return;
             }
-            sellCursor(p, st);
+            // 腐竹 2026-10-28：右键 = 快捷买 64 次，钱/空间不够就尽量多买
+            ExchangeResult r = manager.buyUpTo(p, key, 64);
+            if (r.ok) {
+                p.sendMessage("§a换出 §f" + r.amount + " × " + key.getDisplayName()
+                        + " §7(-" + Text.num(r.total) + ")");
+            } else {
+                p.sendMessage("§c[等价交换] " + r.message);
+            }
+            reopen(p, st);
         }
     }
 
@@ -560,11 +570,15 @@ public final class ExchangeGui {
         if (cap != TradeCap.UNLIMITED) {
             list.removeIf(k -> TradeCap.blocks(cap, manager.engine().priceOf(k)));
         }
+        if (sort == Sort.FAVORITE) {
+            java.util.Set<ItemKey> favs = (p == null)
+                    ? java.util.Set.of()
+                    : new java.util.HashSet<>(store.favorites(p.getUniqueId()));
+            list.removeIf(k -> !favs.contains(k));
+        }
         switch (sort) {
-            case PRICE_ASC -> list.sort(Comparator.comparingDouble(manager::buyUnit)
+            case PRICE_ASC, FAVORITE -> list.sort(Comparator.comparingDouble(manager::buyUnit)
                     .thenComparing(ItemKey::getDisplayName));
-            case NAME -> list.sort(Comparator.comparing(ItemKey::getDisplayName,
-                    String.CASE_INSENSITIVE_ORDER).thenComparing(ItemKey::toString));
             default -> list.sort(Comparator.comparingDouble((ItemKey k) -> -manager.buyUnit(k))
                     .thenComparing(ItemKey::getDisplayName));
         }
@@ -753,6 +767,13 @@ public final class ExchangeGui {
         if (dv != null && dv.recipe != null) {
             inv.setItem(SLOT_DETAIL_MATERIALS, materialsIcon(p, target));
         }
+
+        boolean fav = store.fav(p.getUniqueId(), target);
+        inv.setItem(SLOT_DETAIL_FAV, GuiItems.of(
+                fav ? Material.NETHER_STAR : Material.GOLD_NUGGET,
+                fav ? "§e已收藏" : "§7收藏",
+                "§7收藏的物品会出现在 §f排序 → 收藏 §7里",
+                "§8点一下" + (fav ? "取消收藏" : "加入收藏")));
 
         inv.setItem(SLOT_DETAIL_BACK, GuiItems.of(Material.ARROW, "§e返回",
                 "§7回到物品清单"));

@@ -12,6 +12,7 @@ import me.mrCookieSlime.Slimefun.api.inventory.BlockMenu;
 import me.mrCookieSlime.Slimefun.api.inventory.BlockMenuPreset;
 import net.me.xinzhi.exchange.core.ItemGuard;
 import net.me.xinzhi.exchange.core.ItemKey;
+import net.me.xinzhi.exchange.util.Dialogs;
 import net.me.xinzhi.exchange.exchange.ExchangeService;
 import net.me.xinzhi.exchange.exchange.TradeCap;
 import net.me.xinzhi.exchange.recipe.Recipe;
@@ -59,7 +60,7 @@ public final class SynthesisMachine extends AbstractMachine {
      * 最后一排功能槽。48 = 等价道具槽（腐竹 m01476：合成台也要放等价道具，否则玩家能借
      * 「自动购买材料」绕过显示上限）。
      */
-    private static final int PREV = 45, REFRESH = 46, TARGET = 47, CAP = 48, PAGE_INFO = 49, STATUS = 51, NEXT = 53;
+    private static final int PREV = 45, REFRESH = 46, TARGET = 47, CAP = 48, PAGE_INFO = 49, STATUS = 51, SEARCH = 52, NEXT = 53;
 
     public SynthesisMachine(ItemGroup group, SlimefunItemStack item,
                             RecipeType recipeType, ItemStack[] recipe) {
@@ -94,10 +95,11 @@ public final class SynthesisMachine extends AbstractMachine {
         preset.addItem(STATUS, new CustomItemStack(Material.CLOCK, "§7状态", "§7待机"), (p, s, i, a) -> false);
         preset.addItem(NEXT, new CustomItemStack(Material.ARROW, "§7下一页"), (p, s, i, a) -> false);
         preset.addItem(REFRESH, new CustomItemStack(Material.SPYGLASS, "§b刷新记录", "§7重新记录正上方的机器"), (p, s, i, a) -> false);
-        // 48 是真·空槽（放等价道具），连玻璃板都不放；只锁 50、52
-        for (int i : new int[]{50, 52}) {
-            preset.addItem(i, LOCKED_PANE, (p, s, item, action) -> false);
-        }
+        // 48 是真·空槽（放等价道具），连玻璃板都不放；只锁 50
+        preset.addItem(50, LOCKED_PANE, (p, s, item, action) -> false);
+        // 52 = 搜索（腐竹 2026-10-28）
+        preset.addItem(SEARCH, new CustomItemStack(Material.COMPASS, "§b搜索配方",
+                "§7按产物名 / 材料名筛选"), (p, s, item, action) -> false);
     }
 
     @Override
@@ -107,7 +109,10 @@ public final class SynthesisMachine extends AbstractMachine {
 
     private void render(BlockMenu menu, Block b) {
         Location loc = b.getLocation();
-        List<Recipe> list = recipesFor(b);
+        List<Recipe> all = recipesFor(b);
+        String kwRaw = MachineUtil.info(loc, "xz-syn-kw");
+        final String kwText = kwRaw == null ? "" : kwRaw;
+        List<Recipe> list = filterByKeyword(all, kwText);
         int pages = Math.max(1, (list.size() + WORK.length - 1) / WORK.length);
         int page = Math.min(pages - 1, Math.max(0, MachineUtil.intInfo(loc, "xz-syn-page", 0)));
         MachineUtil.set(loc, "xz-syn-page", String.valueOf(page));
@@ -156,6 +161,11 @@ public final class SynthesisMachine extends AbstractMachine {
                     "§b刷新记录",
                     "§7重新读取正上方的机器",
                     "§8换机器 / 加配方后点一下"));
+            menu.replaceExistingItem(SEARCH, new CustomItemStack(Material.COMPASS,
+                    kwText.isEmpty() ? "§b搜索配方" : "§b搜索: §f" + kwText,
+                    "§7产物名或材料名包含这个关键词才显示",
+                    kwText.isEmpty() ? "§8点一下输入关键词" : "§8点一下可改写 / 清空",
+                    "§7全部 §f" + all.size() + " §7条 → 命中 §f" + list.size() + " §7条"));
             setStatus(menu, list.isEmpty() ? "§c上方机器没有可用配方"
                     : (capNow == MachineUtil.CAP_MISSING ? "§7待机（没放等价道具，不能买材料）" : "§7待机"));
         } catch (Throwable ignored) {
@@ -185,6 +195,42 @@ public final class SynthesisMachine extends AbstractMachine {
             render(menu, b);
             return false;
         });
+        menu.addMenuClickHandler(SEARCH, (p, s, item, action) -> {
+            Dialogs.text((org.bukkit.plugin.java.JavaPlugin) org.bukkit.Bukkit.getPluginManager()
+                            .getPlugin("XinZhiExchange"),
+                    p, "§8✦ 搜索配方 ✦", "§7产物名 / 材料名里的关键词（留空 = 清空）",
+                    kwText, 32,
+                    () -> render(menu, b),
+                    v -> {
+                        String nv = v == null ? "" : v.trim();
+                        MachineUtil.set(loc, "xz-syn-kw", nv);
+                        MachineUtil.set(loc, "xz-syn-page", "0");
+                        render(menu, b);
+                    });
+            return false;
+        });
+    }
+
+    /** 搜索（腐竹 2026-10-28）：产物名或任一材料名包含关键词就命中 */
+    private static List<Recipe> filterByKeyword(List<Recipe> all, String kw) {
+        if (kw == null || kw.isEmpty()) return all;
+        String k = kw.toLowerCase(java.util.Locale.ROOT);
+        List<Recipe> out = new ArrayList<>();
+        for (Recipe r : all) {
+            boolean hit = false;
+            for (ItemKey o : r.getOutputs().keySet()) {
+                String n = o.getDisplayName();
+                if (n != null && n.toLowerCase(java.util.Locale.ROOT).contains(k)) { hit = true; break; }
+            }
+            if (!hit) {
+                for (ItemKey in : r.getInputs().keySet()) {
+                    String n = in.getDisplayName();
+                    if (n != null && n.toLowerCase(java.util.Locale.ROOT).contains(k)) { hit = true; break; }
+                }
+            }
+            if (hit) out.add(r);
+        }
+        return out;
     }
 
     private void setStatus(BlockMenu menu, String text) {
