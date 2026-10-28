@@ -125,7 +125,8 @@ public final class SynthesisMachine extends AbstractMachine {
                 menu.addMenuClickHandler(slot, (p, s, item, action) -> {
                     boolean shift = action != null && action.isShiftClicked();
                     boolean right = action != null && action.isRightClicked();
-                    craft(p, b, idx, shift, right);
+                    // 腐竹 2026-10-28：搜索后点合成必须用「筛选后的那份列表」取配方
+                    craft(p, b, idx, kwText, shift, right);
                     return false;
                 });
             } else {
@@ -281,10 +282,10 @@ public final class SynthesisMachine extends AbstractMachine {
      * <p>腐竹 m00888：左键 1 次、Shift+左键 64 次、Shift+右键尽量填满背包；中间不够就
      * 能做几次做几次，并且宁可少做也不让物品掉出来（m00896）。
      */
-    private void craft(Player p, Block b, int idx, boolean shift, boolean right) {
+    private void craft(Player p, Block b, int idx, String kw, boolean shift, boolean right) {
         ExchangeService svc = ExchangeService.get();
         if (svc == null) return;
-        List<Recipe> list = recipesFor(b);
+        List<Recipe> list = filterByKeyword(recipesFor(b), kw == null ? "" : kw);
         if (idx < 0 || idx >= list.size()) {
             p.sendMessage("§c[合成台] 这条配方已经不在了，重新打开界面");
             return;
@@ -312,6 +313,14 @@ public final class SynthesisMachine extends AbstractMachine {
                 int have = countIn(p, e.getKey());
                 int shortfall = Math.max(0, e.getValue() - have);
                 if (shortfall <= 0) continue;
+                // 腐竹 2026-10-28：能不能买，还要看它是否出现在玩家自己的等价界面里
+                // （清单=已卖过的物品）；没卖过的材料不能靠购买补上
+                if (!buyableByPlayer(p, e.getKey(), svc)) {
+                    unbuyable = e.getKey();
+                    buyWhy = "背包里的 " + shortName(e.getKey())
+                            + " 不够，而且你的等价界面里没有它（先卖过一次才能买）";
+                    break;
+                }
                 double unit = MachineUtil.buyUnit(b.getLocation(), e.getKey());
                 if (!(unit > 0)) {
                     unbuyable = e.getKey();
@@ -359,6 +368,16 @@ public final class SynthesisMachine extends AbstractMachine {
         p.sendMessage("§a[合成台] 合成 §f" + done + " §a次（" + shortName(r.getOutputs().keySet().iterator().next())
                 + "），花费 §f" + fmt(totalSpent) + "§a EMC"
                 + (why == null ? "" : "§7，停在：" + why));
+    }
+
+    /** 玩家自己的等价界面里能不能买到这个物品：清单只由卖出记录生成（PlayerViewStore.sold） */
+    private static boolean buyableByPlayer(Player p, ItemKey k, ExchangeService svc) {
+        if (p == null || k == null || svc == null) return false;
+        try {
+            return svc.viewStore().sold(p.getUniqueId(), k);
+        } catch (Throwable t) {
+            return false;
+        }
     }
 
     /** 还能做几次（受产物在背包里放得下的限制） */
