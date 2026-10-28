@@ -72,22 +72,35 @@ public final class RecipeService {
         int n = storage.loadAll(registry);
         int dropped = registry.removeWhere(this::blacklisted);
         if (dropped > 0) {
-            plugin.getLogger().info("[等价交换] 按黑名单裁掉磁盘配方 " + dropped + " 条");
+            plugin.getLogger().info("[等价交换] 按黑名单（机器/材料）裁掉磁盘配方 " + dropped + " 条");
         }
         plugin.getLogger().info("[等价交换] 配方库已加载: " + registry.size() + " 条 / "
                 + registry.machines().size() + " 台机器");
         return registry.size();
     }
 
-    /** 这台机器在不在黑名单里（腐竹 2026-10-18 点名 LOGITECH_CARD_MAKER） */
+    /**
+     * 这条配方该不该拉黑：机器黑名单（腐竹 2026-10-18 点名 LOGITECH_CARD_MAKER）
+     * 或材料黑名单（腐竹 2026-10-28：替代卡这类「身份靠 nbt 决定」的物品不能被当成普通材料）。
+     */
     private boolean blacklisted(Recipe r) {
         if (r == null) return false;
         net.me.xinzhi.exchange.core.ItemKey machine = r.getMachine();
-        if (machine == null || !machine.isSlimefun()) return false;
-        String id = machine.getSfId();
-        if (id == null) return false;
-        java.util.Set<String> black = config.machineBlacklist;
-        return !black.isEmpty() && black.contains(id.toUpperCase(Locale.ROOT));
+        if (machine != null && machine.isSlimefun()) {
+            String id = machine.getSfId();
+            java.util.Set<String> black = config.machineBlacklist;
+            if (id != null && !black.isEmpty() && black.contains(id.toUpperCase(Locale.ROOT))) return true;
+        }
+        java.util.Set<String> matBlack = config.materialBlacklist;
+        if (matBlack.isEmpty()) return false;
+        java.util.Map<net.me.xinzhi.exchange.core.ItemKey, Integer> inputs = r.getInputs();
+        if (inputs == null || inputs.isEmpty()) return false;
+        for (net.me.xinzhi.exchange.core.ItemKey k : inputs.keySet()) {
+            if (k == null || !k.isSlimefun()) continue;
+            String id = k.getSfId();
+            if (id != null && matBlack.contains(id.toUpperCase(Locale.ROOT))) return true;
+        }
+        return false;
     }
 
     /**
@@ -338,7 +351,7 @@ public final class RecipeService {
         long ms = System.currentTimeMillis() - start;
         int dup = kept.size() - added;
         plugin.getLogger().info("[等价交换] 扫描完成: 真实机器配方 " + realCount
-                + " 条，兜底配方 " + ownCount + " 条，黑名单 " + black
+                + " 条，兜底配方 " + ownCount + " 条，黑名单(机器/材料) " + black
                 + " 条，重复丢掉 " + dup + " 条（保留读取顺序更靠前的附属版本）"
                 + "，去自环 " + RecipeSanitizer.dropped()
                 + (broken > 0 ? " 条，跳过坏物品 " + broken + " 个" : "")

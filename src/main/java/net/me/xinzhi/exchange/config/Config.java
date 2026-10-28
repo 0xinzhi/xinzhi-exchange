@@ -37,6 +37,16 @@ public final class Config {
      */
     public final java.util.Set<String> machineBlacklist;
 
+    /**
+     * 配方材料黑名单（腐竹 2026-10-28：「这个替代卡替代的东西太多了」）：
+     * 只要一条配方的<b>材料</b>里出现这些物品，整条配方不入库、也不展示。
+     * 用于「身份可变」的物品 —— 典型是 LogiTech 的替代卡 LOGITECH_REPLACE_CARD / LOGITECH_REPLACE_SF_CARD：
+     * 它靠 nbt(rep_mat_id) 记录被替代物品，而 {@link net.me.xinzhi.exchange.core.ItemKey} 只按
+     * 粘液 id 归一、忽略 nbt，于是任意一张裸卡都能冒充配方里要求的任何材料。
+     * 写 SF id（不带 SF: 前缀），大小写不敏感。
+     */
+    public final java.util.Set<String> materialBlacklist;
+
     public final boolean scanOnStart;
     /**
      * 启动时是否先读上次的配方文件当临时价表（腐竹 2026-10-18：「每次服务器重启都需要
@@ -198,6 +208,16 @@ public final class Config {
         }
         if (!c.isSet("scan.machine-blacklist")) black.add("LOGITECH_CARD_MAKER");
         this.machineBlacklist = java.util.Collections.unmodifiableSet(black);
+
+        java.util.Set<String> matBlack = new java.util.LinkedHashSet<>();
+        for (String s : c.getStringList("scan.material-blacklist")) {
+            if (s != null && !s.isBlank()) matBlack.add(s.trim().toUpperCase(java.util.Locale.ROOT));
+        }
+        if (!c.isSet("scan.material-blacklist")) {
+            matBlack.add("LOGITECH_REPLACE_CARD");
+            matBlack.add("LOGITECH_REPLACE_SF_CARD");
+        }
+        this.materialBlacklist = java.util.Collections.unmodifiableSet(matBlack);
 
         this.scanOnStart = c.getBoolean("scan.on-start", true);
         this.reuseDisk = c.getBoolean("scan.reuse-disk", false);
