@@ -48,6 +48,8 @@ public final class PriceBook {
     private static final String BUILTIN = "prices-builtin.tsv";
     /** 服主手工价的内置默认值（新装服务器开箱即用；与 manual 同层，prices.yml 可覆盖） */
     private static final String BUILTIN_MANUAL = "prices-builtin-manual.tsv";
+    /** 只压卖价的定价表（买价不受影响）：铁轨、可刷钱的东西都放这里 */
+    private static final String BUILTIN_SELL = "prices-builtin-sell.tsv";
 
     private final JavaPlugin plugin;
     private final File file;
@@ -59,6 +61,8 @@ public final class PriceBook {
     private final Map<ItemKey, Double> manual = new LinkedHashMap<>(256);
     /** 内置手工价默认值（prices-builtin-manual.tsv），优先级高于 prices.yml 的 vanilla/slimefun 段、低于 yml 的 manual 段 */
     private final Map<ItemKey, Double> builtinManual = new LinkedHashMap<>(256);
+    /** 只作用于卖价的定价（prices.yml 的 sell: 段 + 内置 prices-builtin-sell.tsv），买价不读它 */
+    private final Map<ItemKey, Double> sell = new LinkedHashMap<>(64);
 
     public PriceBook(JavaPlugin plugin) {
         this.plugin = plugin;
@@ -74,6 +78,9 @@ public final class PriceBook {
     public String originOf(ItemKey key) { return origin.getOrDefault(key, "builtin"); }
 
     public int count() { return anchors.size(); }
+
+    /** 卖价专用定价（只读）：key → 卖价 */
+    public Map<ItemKey, Double> sellEntries() { return java.util.Collections.unmodifiableMap(sell); }
 
     /** manual: 段的全部条目（只读） */
     public Map<ItemKey, Double> manualEntries() { return java.util.Collections.unmodifiableMap(manual); }
@@ -110,10 +117,12 @@ public final class PriceBook {
             manualCount += mergeSection(m.getConfigurationSection("vanilla"), true, "manual", manual);
             manualCount += mergeSection(m.getConfigurationSection("slimefun"), false, "manual", manual);
         }
+        sell.clear();
+        loadSell(yml);
         applyEmbedded();
         plugin.getLogger().info("[等价交换] 定价表: 内置 " + builtin.size()
                 + " 条，prices.yml 覆盖 " + n + " 条，手工 " + manualCount + " 条，合计 " + anchors.size() + " 条"
-                + "，附属内嵌 " + EmcRegistry.size() + " 条");
+                + "，附属内嵌 " + EmcRegistry.size() + " 条，仅卖价 " + sell.size() + " 条");
     }
 
     /**
@@ -133,6 +142,60 @@ public final class PriceBook {
             anchors.put(k, e.getValue());
             origin.put(k, "addon");
         }
+    }
+
+    /** 卖价专用定价：内置表打底，prices.yml 的 sell 段覆盖 */
+    private void loadSell(YamlConfiguration yml) {
+        try (InputStream is = plugin.getResource(BUILTIN_SELL)) {
+            if (is != null) {
+                try (BufferedReader r = new BufferedReader(new InputStreamReader(is, StandardCharsets.UTF_8))) {
+                    String line;
+                    while ((line = r.readLine()) != null) {
+                        line = line.trim();
+                        if (line.isEmpty() || line.startsWith("#")) continue;
+                        int tab = line.indexOf('\t');
+                        if (tab <= 0) continue;
+                        ItemKey ik = ItemKey.fromStored(line.substring(0, tab).trim());
+                        if (ik == null) continue;
+                        try { sell.put(ik, Double.parseDouble(line.substring(tab + 1).trim())); }
+                        catch (NumberFormatException ignored) { }
+                    }
+                }
+            }
+        } catch (Throwable t) {
+            plugin.getLogger().warning("[等价交换] 读内置卖价表失败: " + t);
+        }
+        ConfigurationSection sec = yml.getConfigurationSection("sell");
+        if (sec == null) return;
+        for (String group : sec.getKeys(false)) {
+            ConfigurationSection sub = sec.getConfigurationSection(group);
+            if (sub == null) continue;
+            boolean vanilla = "vanilla".equalsIgnoreCase(group);
+            for (String k : sub.getKeys(false)) {
+                double v = sub.getDouble(k, Double.NaN);
+                if (Double.isNaN(v) || v < 0) continue;
+                ItemKey key = vanilla ? vanillaKey(k) : ItemKey.slimefun(k);
+                if (key == null) continue;
+                sell.put(key, v);
+            }
+        }
+    }
+
+    /** 写一条卖价专用定价（/xzex setsell），落盘到 prices.yml 的 sell.vanilla / sell.slimefun */
+    public synchronized boolean setSell(ItemKey key, double value) {
+        if (key == null) return false;
+        String name = key.isVanilla()
+                ? (key.getMaterial() == null ? null : key.getMaterial().name())
+                : key.getSfId();
+        if (name == null) return false;
+        YamlConfiguration yml = YamlConfiguration.loadConfiguration(file);
+        yml.set((key.isVanilla() ? "sell.vanilla." : "sell.slimefun.") + name, Text.round2(value));
+        try { yml.save(file); } catch (Throwable t) {
+            plugin.getLogger().warning("[等价交换] 写卖价失败: " + t);
+            return false;
+        }
+        sell.put(key, value);
+        return true;
     }
 
     private int mergeSection(ConfigurationSection sec, boolean vanilla, String from) {

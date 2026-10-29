@@ -118,6 +118,7 @@ public final class PriceEngine {
     private String paletteMode = "max";
     private int vanillaFirstCount;
     private int paletteCount;
+    private int sellOverridesCount;
     private int machineBootstrapped;
 
     // ============================================================
@@ -893,6 +894,28 @@ public final class PriceEngine {
     }
 
     /** 卖价（换入）；没有特殊规则时等于买价 */
+    /**
+     * 卖价专用定价（腐竹 2026-10-29「铁轨/地毯卖价统一为 1」）：
+     * 只改卖价，买价照旧；卖价永远不超过买价。
+     */
+    public void applySellOverrides(Map<ItemKey, Double> m) {
+        if (m == null || m.isEmpty()) return;
+        sellOverridesCount = 0;
+        for (Map.Entry<ItemKey, Double> e : m.entrySet()) {
+            ItemKey k = e.getKey();
+            Double v = e.getValue();
+            if (k == null || v == null || !(v >= 0) || Double.isNaN(v) || Double.isInfinite(v)) continue;
+            Double buy = prices.get(k);
+            double target = buy == null ? v : Math.min(v, buy);
+            Double old = sellPrices.get(k);
+            sellPrices.put(k, target);
+            if (old == null || Math.abs(old - target) > 1e-9) sellOverridesCount++;
+        }
+    }
+
+    /** 被「仅卖价」表改掉的物品数（0.4.11） */
+    public int sellOverridesCount() { return sellOverridesCount; }
+
     public double sellPriceOf(ItemKey k) {
         if (k == null) return 0;
         Double v = sellPrices.get(k);

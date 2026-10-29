@@ -118,6 +118,10 @@ public final class ExchangeCommand implements CommandExecutor, TabCompleter {
                 if (!admin(s)) return true;
                 unset(s, args);
             }
+            case "setsell" -> {
+                if (!admin(s)) return true;
+                setsell(s, args);
+            }
             case "balance" -> balance(s, args);
             case "give" -> give(s, args);
             case "admin" -> adminItems(s);
@@ -331,6 +335,7 @@ public final class ExchangeCommand implements CommandExecutor, TabCompleter {
         s.sendMessage("§7/xzex reload §f重读 prices.yml");
         s.sendMessage("§7/xzex export §f导出全量价表到 diag/");
         s.sendMessage("§7/xzex set <物品> <价格> §f写手工价（进 prices.yml 的 manual）");
+        s.sendMessage("§7/xzex setsell <物品> <卖价> §f只改卖价，买价不变（进 prices.yml 的 sell）");
         s.sendMessage("§7/xzex unset <物品> §f删手工价");
         s.sendMessage("§7/xzex give <玩家> <数量> §f给价值");
         s.sendMessage("§7/xzex admin §f给自己发两个管理道具（价格定制 / 批量定价）");
@@ -642,6 +647,32 @@ public final class ExchangeCommand implements CommandExecutor, TabCompleter {
         } catch (Throwable t) {
             s.sendMessage("§c[等价交换] 导出失败: " + t);
         }
+    }
+
+    /** /xzex setsell <物品> <卖价>：只改卖价，买价不动（铁轨/地毯这类「卖价统一 1」用） */
+    private void setsell(CommandSender s, String[] args) {
+        if (args.length < 3) {
+            s.sendMessage("§c用法: /xzex setsell <物品> <卖价>");
+            return;
+        }
+        ItemKey key = resolve(args[1]);
+        if (key == null) {
+            s.sendMessage("§c[等价交换] 找不到这个物品: " + args[1]);
+            return;
+        }
+        double v;
+        try { v = Double.parseDouble(args[2]); } catch (NumberFormatException ex) {
+            s.sendMessage("§c卖价必须是数字");
+            return;
+        }
+        if (!(v >= 0)) { s.sendMessage("§c卖价不能是负数"); return; }
+        v = Text.round2(v);
+        if (!svc.book().setSell(key, v)) {
+            s.sendMessage("§c写 prices.yml 失败，看后台日志");
+            return;
+        }
+        svc.reloadPrices();
+        s.sendMessage("§a[等价交换] " + key.getDisplayName() + " 的卖价 = §e" + Text.num(v) + " §7（买价不变）");
     }
 
     private void set(CommandSender s, String[] args) {

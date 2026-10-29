@@ -406,6 +406,7 @@ public final class ExchangeService {
             engine.setMachineBootstrap(config.machineBootstrap);
             engine.setVanillaFirst(config.vanillaFirst);
             engine.setPaletteMode(config.paletteUnify);
+            engine.applySellOverrides(book.sellEntries());
             Map<ItemKey, Double> eff = new LinkedHashMap<>(effectiveAnchors());
             PriceEngine.SellRules sellRules = new PriceEngine.SellRules(config.compressedSellCap,
                     config.compressedKeywords, config.generatorSellRate, config.generatorKeywords);
@@ -449,6 +450,7 @@ public final class ExchangeService {
                     + "；机器引导 " + engine.machineBootstrapped() + " 台"
                     + "；原版配方先行 " + engine.vanillaFirstCount() + " 个"
                     + "；色变体统一 " + engine.paletteCount() + " 个"
+                    + "；仅卖价 " + engine.sellOverridesCount() + " 个"
                     + "；严格顺序（抬到早期附属配方）" + engine.orderForcedCount() + " 个物品"
                     + "；耗时 " + engine.lastBuildMillis() + " ms"
                     + "；手续费 " + config.tax);
