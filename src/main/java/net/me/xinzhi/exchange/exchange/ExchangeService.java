@@ -384,6 +384,8 @@ public final class ExchangeService {
         for (ItemKey k : candidates) a.remove(k);
         PriceEngine tmp = new PriceEngine();
         tmp.setMachineBootstrap(config.machineBootstrap);
+        tmp.setVanillaFirst(config.vanillaFirst);
+        tmp.setPaletteMode(config.paletteUnify);
         tmp.rebuild(recipes.registry(), a, config.staged, tier,
                 config.requireMachine ? this::isFreeMachine : null, geoDefaults(), dropDefaults(), null);
         Map<ItemKey, Double> out = new LinkedHashMap<>();
@@ -402,6 +404,8 @@ public final class ExchangeService {
             book.applyEmbedded();       // 运行期注册的附属值也要生效（不必重读 prices.yml）
             VanillaRecipeExtractor.ensureRegisteredIfReady(recipes.registry());
             engine.setMachineBootstrap(config.machineBootstrap);
+            engine.setVanillaFirst(config.vanillaFirst);
+            engine.setPaletteMode(config.paletteUnify);
             Map<ItemKey, Double> eff = new LinkedHashMap<>(effectiveAnchors());
             PriceEngine.SellRules sellRules = new PriceEngine.SellRules(config.compressedSellCap,
                     config.compressedKeywords, config.generatorSellRate, config.generatorKeywords);
@@ -443,6 +447,8 @@ public final class ExchangeService {
                         ? "开（机器没价 ⇒ 它的配方不报价，跳过 " + engine.machineBlockedRecipes() + " 条）"
                         : "关")
                     + "；机器引导 " + engine.machineBootstrapped() + " 台"
+                    + "；原版配方先行 " + engine.vanillaFirstCount() + " 个"
+                    + "；色变体统一 " + engine.paletteCount() + " 个"
                     + "；严格顺序（抬到早期附属配方）" + engine.orderForcedCount() + " 个物品"
                     + "；耗时 " + engine.lastBuildMillis() + " ms"
                     + "；手续费 " + config.tax);

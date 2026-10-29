@@ -40,6 +40,10 @@ public final class Config {
      * 关掉的话附属机器的配方会因为没有机器价而全部不参与定价。
      */
     public final boolean machineBootstrap;
+    /** 原版物品优先用原版配方（腐竹 2026-10-29「尽量不使用粘液配方」），false = 旧行为（谁便宜用谁） */
+    public final boolean vanillaFirst;
+    /** 同色变体统一价：max / min / avg / off */
+    public final String paletteUnify;
 
     /**
      * 配方机器黑名单（腐竹 2026-10-18 点名 LOGITECH_CARD_MAKER）：
@@ -214,6 +218,8 @@ public final class Config {
         this.requireMachine = c.getBoolean("price.require-machine", true);
         this.anchorDerive = c.getBoolean("price.anchor-derive", true);
         this.machineBootstrap = c.getBoolean("price.machine-bootstrap", true);
+        this.vanillaFirst = c.getBoolean("price.vanilla-first", true);
+        this.paletteUnify = c.getString("price.palette-unify", "max");
 
         java.util.Set<String> black = new java.util.LinkedHashSet<>();
         for (String s : c.getStringList("scan.machine-blacklist")) {

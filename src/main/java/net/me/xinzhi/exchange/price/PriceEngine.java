@@ -4,6 +4,7 @@ import net.me.xinzhi.exchange.core.ItemKey;
 import net.me.xinzhi.exchange.recipe.Recipe;
 import net.me.xinzhi.exchange.recipe.RecipeRegistry;
 import net.me.xinzhi.exchange.util.Text;
+import org.bukkit.Material;
 
 import java.util.ArrayList;
 import java.util.Collection;
@@ -64,7 +65,13 @@ public final class PriceEngine {
     private static final int ORDER_ROUNDS = 5;
 
     /** 价格来源：锚点（定价表/手工价）/ 配方推导 / 地理资源默认价 / 生物掉落兜底价 */
-    public enum Origin { ANCHOR, RECIPE, GEO, DROP }
+    public enum Origin { ANCHOR, RECIPE, GEO, DROP, PALETTE }
+
+    /** 同色变体族后缀（0.4.9）：<颜色>_XXX 与无颜色的本体（如 TERRACOTTA / SHULKER_BOX）算一族 */
+    private static final List<String> PALETTE_SUFFIXES = List.of(
+            "WOOL", "CARPET", "BED", "BANNER", "WALL_BANNER", "CANDLE", "SHULKER_BOX",
+            "CONCRETE", "CONCRETE_POWDER", "STAINED_GLASS", "STAINED_GLASS_PANE",
+            "TERRACOTTA", "GLAZED_TERRACOTTA", "DYE", "HARNESS");
 
     /** 一个物品的价格推导过程（界面 / 命令溯源用） */
     public static final class Derivation {
@@ -105,6 +112,12 @@ public final class PriceEngine {
     private int orderForced;
     /** 机器引导开关（见 {@link #bootstrapMachines}）；默认开 */
     private boolean machineBootstrap = true;
+    /** 原版物品优先用原版配方定价（腐竹 2026-10-29：「原版物品配方优先使用原版配方。尽量不使用粘液配方」） */
+    private boolean vanillaFirst = true;
+    /** 同色变体统一价：max / min / avg / off */
+    private String paletteMode = "max";
+    private int vanillaFirstCount;
+    private int paletteCount;
     private int machineBootstrapped;
 
     // ============================================================
@@ -132,6 +145,12 @@ public final class PriceEngine {
     public int machineBootstrapped() { return machineBootstrapped; }
     /** 是否在定价前先给「当机器用的那些物品」算一轮价（默认开） */
     public void setMachineBootstrap(boolean v) { this.machineBootstrap = v; }
+    /** 原版配方先跑一趟定位出来的原版物品数（0.4.9） */
+    public int vanillaFirstCount() { return vanillaFirstCount; }
+    public void setVanillaFirst(boolean v) { this.vanillaFirst = v; }
+    /** 同色变体被统一成同一个价的物品数（0.4.9） */
+    public int paletteCount() { return paletteCount; }
+    public void setPaletteMode(String mode) { this.paletteMode = mode == null ? "off" : mode; }
     public int pricedCount() { return prices.size(); }
 
     public boolean hasPrice(ItemKey k) { return k != null && prices.containsKey(k); }
@@ -319,7 +338,10 @@ public final class PriceEngine {
         fillDrops(normal, normalDer, dropDefaults);
         dropCount = countByOrigin(normalDer, Origin.DROP);
 
-        recipeCount = normal.size() - anchorCount - geoCount - dropCount;
+        // 1.9) 同色变体统一价（床 / 羊毛 / 旗帜 / 潜影盒 …）
+        paletteCount = unifyPalettes(normal, normalDer);
+
+        recipeCount = normal.size() - anchorCount - geoCount - dropCount - paletteCount;
         unpricedCount = countUnpriced(registry, normal);
 
         // 2) 卖价：压缩封顶 + 生成器产物，只降不升
@@ -375,6 +397,19 @@ public final class PriceEngine {
     private void buildAll(List<Recipe> all, boolean staged, MachineTier tier,
                           Predicate<ItemKey> gate,
                           Map<ItemKey, Double> pm, Map<ItemKey, Derivation> dm) {
+        vanillaFirstCount = 0;
+        if (vanillaFirst) {
+            List<Recipe> vanillaOnly = new ArrayList<>();
+            for (Recipe r : all) {
+                ItemKey m = r.getMachine();
+                if (m != null && m.isVanilla()) vanillaOnly.add(r);
+            }
+            if (!vanillaOnly.isEmpty()) {
+                int before = pm.size();
+                runPass(vanillaOnly, gate, pm, dm);
+                vanillaFirstCount = pm.size() - before;
+            }
+        }
         if (staged && tier != null) {
             List<Recipe> core = new ArrayList<>(all.size());
             for (Recipe r : all) if (tier.isCore(r.getMachine())) core.add(r);
@@ -434,6 +469,7 @@ public final class PriceEngine {
                 Integer rank = minRank.get(k);
                 if (rank == null || rank != r.getPriority()) continue;   // 只看最早档位的配方
                 if (anchors != null && anchors.containsKey(k)) continue; // 真锚点不动
+                if (k.isVanilla()) continue;                             // 原版物品交给原版配方，别被粘液配方抬价
                 int qty = Math.max(1, o.getValue());
                 double v = cost / qty;
                 if (!(v > 0) || Double.isNaN(v) || Double.isInfinite(v)) continue;
@@ -453,6 +489,63 @@ public final class PriceEngine {
                 }
             }
         }
+    }
+
+    /**
+     * 同色变体统一价（腐竹 2026-10-29：「颜色变体用统一价格，比如床，潜影盒，旗帜，羊毛之类的」）。
+     *
+     * <p>按后缀把「<颜色>_XXX」归为一族（含无颜色的本体，如 TERRACOTTA / SHULKER_BOX），
+     * 取族内已定价成员的最大 / 最小 / 平均（{@code price.palette-unify}，默认 max：不会出现
+     * 「用便宜颜色换贵颜色」的套利，也不会低于任何一条真实成本链），再把全族写成同一个价。
+     */
+    private int unifyPalettes(Map<ItemKey, Double> pm, Map<ItemKey, Derivation> dm) {
+        if (paletteMode == null || paletteMode.equalsIgnoreCase("off") || paletteMode.equalsIgnoreCase("false")) return 0;
+        Map<String, List<ItemKey>> families = new HashMap<>();
+        for (Material m : Material.values()) {
+            if (!m.isItem() || m.isAir()) continue;
+            String fam = paletteFamily(m.name());
+            if (fam == null) continue;
+            families.computeIfAbsent(fam, x -> new ArrayList<>(20)).add(ItemKey.vanilla(m));
+        }
+        int changed = 0;
+        for (List<ItemKey> keys : families.values()) {
+            if (keys.size() < 2) continue;
+            double max = 0;
+            double min = Double.MAX_VALUE;
+            double sum = 0;
+            int n = 0;
+            for (ItemKey k : keys) {
+                Double v = pm.get(k);
+                if (v == null || !(v > 0) || Double.isInfinite(v) || Double.isNaN(v)) continue;
+                max = Math.max(max, v);
+                min = Math.min(min, v);
+                sum += v;
+                n++;
+            }
+            if (n == 0) continue;
+            double target = switch (paletteMode.toLowerCase(Locale.ROOT)) {
+                case "min" -> min;
+                case "avg" -> Math.round(sum / n * 100.0) / 100.0;
+                default -> max;
+            };
+            if (!(target > 0)) continue;
+            for (ItemKey k : keys) {
+                Double cur = pm.get(k);
+                if (cur != null && Math.abs(cur - target) < 1e-9) continue;
+                pm.put(k, target);
+                dm.put(k, new Derivation(Origin.PALETTE, target, null));
+                changed++;
+            }
+        }
+        return changed;
+    }
+
+    /** 颜色变体族：返回族名（后缀），不是变体返回 null */
+    private static String paletteFamily(String name) {
+        for (String suffix : PALETTE_SUFFIXES) {
+            if (name.equals(suffix) || name.endsWith("_" + suffix)) return suffix;
+        }
+        return null;
     }
 
     private static boolean sameValues(Map<ItemKey, Double> a, Map<ItemKey, Double> b) {

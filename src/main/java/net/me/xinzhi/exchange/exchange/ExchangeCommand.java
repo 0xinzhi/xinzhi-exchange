@@ -406,6 +406,9 @@ public final class ExchangeCommand implements CommandExecutor, TabCompleter {
         } else if (dv.origin == PriceEngine.Origin.GEO) {
             s.sendMessage("§7来源: §f地理资源默认价 §8（没有合成配方，按配置补 "
                     + Text.num(svc.config().geoResourcePrice) + "；/xzex set 可覆盖）");
+        } else if (dv.origin == PriceEngine.Origin.PALETTE) {
+            s.sendMessage("§7来源: §f同色变体统一价 §8（全族取同一个价，"
+                    + svc.config().paletteUnify + "；/xzex set 可覆盖）");
         } else {
             s.sendMessage("§7来源: §f配方推导 §8（机器: " + dv.machine.getDisplayName() + "）");
             Recipe r = dv.recipe;
@@ -620,6 +623,7 @@ public final class ExchangeCommand implements CommandExecutor, TabCompleter {
                 case GEO -> "geo-default";
                 case DROP -> "mob-drop";
                 case RECIPE -> "recipe";
+                case PALETTE -> "palette";
             };
             String machine = dv == null || dv.machine == null ? "" : dv.machine.toString();
             sb.append(k).append('\t').append(Text.plain(k.getDisplayName())).append('\t')

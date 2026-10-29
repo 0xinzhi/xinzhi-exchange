@@ -46,6 +46,8 @@ public final class PriceBook {
 
     private static final String FILE_NAME = "prices.yml";
     private static final String BUILTIN = "prices-builtin.tsv";
+    /** 服主手工价的内置默认值（新装服务器开箱即用；与 manual 同层，prices.yml 可覆盖） */
+    private static final String BUILTIN_MANUAL = "prices-builtin-manual.tsv";
 
     private final JavaPlugin plugin;
     private final File file;
@@ -55,6 +57,8 @@ public final class PriceBook {
     private final Map<ItemKey, String> origin = new LinkedHashMap<>(2048);
     /** manual: 段里的条目（定制机 / 批量定价面板直接操作这一层） */
     private final Map<ItemKey, Double> manual = new LinkedHashMap<>(256);
+    /** 内置手工价默认值（prices-builtin-manual.tsv），优先级高于 prices.yml 的 vanilla/slimefun 段、低于 yml 的 manual 段 */
+    private final Map<ItemKey, Double> builtinManual = new LinkedHashMap<>(256);
 
     public PriceBook(JavaPlugin plugin) {
         this.plugin = plugin;
@@ -82,6 +86,7 @@ public final class PriceBook {
         anchors.clear();
         origin.clear();
         manual.clear();
+        builtinManual.clear();
         loadBuiltin();
         anchors.putAll(builtin);
         for (ItemKey k : builtin.keySet()) origin.put(k, "builtin");
@@ -93,6 +98,12 @@ public final class PriceBook {
         int n = 0;
         n += mergeSection(yml.getConfigurationSection("vanilla"), true, "prices.yml");
         n += mergeSection(yml.getConfigurationSection("slimefun"), false, "prices.yml");
+        // 内置手工价：盖过 prices.yml 的 vanilla/slimefun 段，但下面的 manual 段仍能覆盖它
+        for (Map.Entry<ItemKey, Double> e : builtinManual.entrySet()) {
+            anchors.put(e.getKey(), e.getValue());
+            origin.put(e.getKey(), "manual");
+            manual.put(e.getKey(), e.getValue());
+        }
         ConfigurationSection m = yml.getConfigurationSection("manual");
         int manualCount = 0;
         if (m != null) {
@@ -184,6 +195,27 @@ public final class PriceBook {
             }
         } catch (Throwable t) {
             plugin.getLogger().warning("[等价交换] 读内置定价表失败: " + t);
+        }
+        // 3) 服主手工价的内置默认值（与 manual 同层）
+        try (InputStream is = plugin.getResource(BUILTIN_MANUAL)) {
+            if (is == null) return;
+            try (BufferedReader r = new BufferedReader(new InputStreamReader(is, StandardCharsets.UTF_8))) {
+                String line;
+                while ((line = r.readLine()) != null) {
+                    line = line.trim();
+                    if (line.isEmpty() || line.startsWith("#")) continue;
+                    int tab = line.indexOf('\t');
+                    if (tab <= 0) continue;
+                    ItemKey ik = ItemKey.fromStored(line.substring(0, tab).trim());
+                    if (ik == null) continue;
+                    double v;
+                    try { v = Double.parseDouble(line.substring(tab + 1).trim()); }
+                    catch (NumberFormatException e) { continue; }
+                    builtinManual.put(ik, v);
+                }
+            }
+        } catch (Throwable t) {
+            plugin.getLogger().warning("[等价交换] 读内置手工价失败: " + t);
         }
     }
 
