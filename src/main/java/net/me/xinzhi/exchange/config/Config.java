@@ -29,6 +29,12 @@ public final class Config {
      * （否则「用自己造的高级机器把自己造得更便宜」这种隐性环会把普通材料压到地板价）。
      */
     public final boolean requireMachine;
+    /**
+     * 「有配方的锚点交给配方推导」（腐竹 2026-10-29「我觉得可以直接换了」）。
+     * 打开后：prices.yml / 内置表里凡是自己也有配方的物品，不再用表里的价，
+     * 改由配方算；manual 段（/xzex set 或批量定价写的）永远保留，不受影响。
+     */
+    public final boolean anchorDerive;
 
     /**
      * 配方机器黑名单（腐竹 2026-10-18 点名 LOGITECH_CARD_MAKER）：
@@ -201,6 +207,7 @@ public final class Config {
         this.rejectModified = c.getBoolean("price.reject-modified-items", true);
         this.staged = c.getBoolean("price.staged", true);
         this.requireMachine = c.getBoolean("price.require-machine", true);
+        this.anchorDerive = c.getBoolean("price.anchor-derive", false);
 
         java.util.Set<String> black = new java.util.LinkedHashSet<>();
         for (String s : c.getStringList("scan.machine-blacklist")) {

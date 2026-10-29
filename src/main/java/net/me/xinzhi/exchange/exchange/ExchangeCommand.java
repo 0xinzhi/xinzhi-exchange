@@ -32,7 +32,7 @@ public final class ExchangeCommand implements CommandExecutor, TabCompleter {
     private static final List<String> SUBS = List.of(
             "help", "info", "price", "why", "roots", "top", "scan", "rebuild", "reload",
             "export", "set", "unset", "balance", "give", "admin", "menu", "emc", "limit", "craft",
-            "norecipe", "recalc");
+            "norecipe", "recalc", "anchor");
 
     private final JavaPlugin plugin;
     private final ExchangeService svc;
@@ -83,6 +83,10 @@ public final class ExchangeCommand implements CommandExecutor, TabCompleter {
                 svc.rescan(() -> s.sendMessage("§a[等价交换] 扫描完成："
                         + svc.registry().size() + " 条配方 / "
                         + svc.registry().machines().size() + " 台机器"));
+            }
+            case "anchor" -> {
+                if (!viewAll(s)) return true;
+                anchorMode(s, args);
             }
             case "recalc" -> {
                 if (!viewAll(s)) return true;
@@ -318,6 +322,7 @@ public final class ExchangeCommand implements CommandExecutor, TabCompleter {
         s.sendMessage("§7/xzex top [n] §f最贵的 n 个物品 §8（仅管理）");
         s.sendMessage("§7/xzex norecipe [n|add] §f原版·无配方的物品（只能手工定价）§8（仅管理）");
         s.sendMessage("§7/xzex recalc [n] §f有配方但吃锚点价的物品，用配方试算一遍做对照（只读）§8（仅管理）");
+        s.sendMessage("§7/xzex anchor [on|off] §f有配方的物品用配方推导，还是用表里的价§8（仅管理）");
         s.sendMessage("§7/xzex balance [玩家] §f查余额");
         s.sendMessage("§7/xzex menu [on|off] §f开关超级菜单（客户端装 mod 才生效）");
         s.sendMessage("§c—— 管理 ——");
@@ -879,6 +884,88 @@ public final class ExchangeCommand implements CommandExecutor, TabCompleter {
      *   <li>{@code /xzex norecipe add} 全部丢进批量定价面板，直接在里面填价</li>
      * </ul>
      */
+    /**
+     * /xzex anchor [on|off] —— 「有配方的物品交给配方推导」的总开关。
+     *
+     * <p>腐竹 2026-10-29 看过 /xzex recalc 对照后说「我觉得可以直接换了」：
+     * 打开后 prices.yml / 内置表里凡是自己也有配方的物品都不再吃表里的价，
+     * 改由配方算（石英块自动变成 16）；manual 段的手工价保留。
+     * 切换时会导出一份前后对照 diag/anchor-switch.tsv，方便反悔。
+     */
+    private void anchorMode(CommandSender s, String[] args) {
+        if (args.length < 2) {
+            s.sendMessage("§6有配方物品的定价方式: " + (svc.anchorDerive()
+                    ? "§a由配方推导 §8（表里的价不再压着它，手工价除外）"
+                    : "§e用表里的价 §8（锚点优先，配方只给没定价的算）"));
+            s.sendMessage("§7用法: §f/xzex anchor on §7= 交给配方推导　§f/xzex anchor off §7= 恢复用表里的价");
+            return;
+        }
+        boolean on;
+        switch (args[1].trim().toLowerCase(Locale.ROOT)) {
+            case "on", "true", "1", "开" -> on = true;
+            case "off", "false", "0", "关" -> on = false;
+            default -> { s.sendMessage("§c用法: §f/xzex anchor on|off"); return; }
+        }
+        if (on == svc.anchorDerive()) {
+            s.sendMessage("§7[等价交换] 已经是这个状态了（现在: " + (on ? "§a配方推导§7" : "§e表里的价§7") + "）");
+            return;
+        }
+
+        Map<ItemKey, Double> before = new LinkedHashMap<>(svc.engine().snapshotPrices());
+        svc.setAnchorDerive(on);
+        svc.rebuildPrices(on ? "锚点交给配方推导" : "恢复用表里的价");
+        Map<ItemKey, Double> after = svc.engine().snapshotPrices();
+
+        // 前后对照 + 体感统计
+        int up = 0, down = 0, gone = 0, added = 0;
+        double maxUp = 0, maxDown = 0;
+        String upWhat = "", downWhat = "";
+        StringBuilder sb = new StringBuilder();
+        sb.append("# 等价交换｜切换「有配方物品的定价方式」前后对照\n");
+        sb.append("# 模式: ").append(on ? "配方推导" : "表里的价").append("\n");
+        sb.append("# key\tname\tbefore\tafter\tratio\n");
+        java.util.TreeSet<ItemKey> keys = new java.util.TreeSet<>(Comparator.comparing(ItemKey::toString));
+        keys.addAll(before.keySet());
+        keys.addAll(after.keySet());
+        for (ItemKey k : keys) {
+            Double b = before.get(k), a = after.get(k);
+            if (b == null && a == null) continue;
+            if (b == null) added++;
+            else if (a == null) gone++;
+            else if (a > b + 1e-9) {
+                up++;
+                double r = a / b;
+                if (r > maxUp) { maxUp = r; upWhat = Text.plain(k.getDisplayName()) + " " + Text.num(b) + "→" + Text.num(a); }
+            } else if (a < b - 1e-9) {
+                down++;
+                double r = b / a;
+                if (r > maxDown) { maxDown = r; downWhat = Text.plain(k.getDisplayName()) + " " + Text.num(b) + "→" + Text.num(a); }
+            }
+            sb.append(k).append('\t').append(Text.plain(k.getDisplayName())).append('\t')
+                    .append(b == null ? "" : b).append('\t').append(a == null ? "" : a).append('\t')
+                    .append(b == null || a == null || b <= 0 ? "" : Math.round(a / b * 1000) / 1000.0).append('\n');
+        }
+        String path = "写文件失败";
+        try {
+            File dir = new File(plugin.getDataFolder(), "diag");
+            if (!dir.exists()) dir.mkdirs();
+            File out = new File(dir, "anchor-switch.tsv");
+            Files.write(out.toPath(), sb.toString().getBytes(StandardCharsets.UTF_8));
+            path = out.getPath();
+        } catch (Throwable t) {
+            path = "写文件失败: " + t;
+        }
+
+        s.sendMessage("§a[等价交换] 已切换成 §f" + (on ? "配方推导" : "表里的价")
+                + "§a，价表重建完成（§7" + svc.engine().pricedCount() + " 个有价§a）");
+        s.sendMessage("§7涨价 §e" + up + " §7个（最大 ×" + Text.num(Math.round(maxUp * 100) / 100.0) + " §8" + upWhat + "§7）");
+        s.sendMessage("§7降价 §e" + down + " §7个（最大 ×" + Text.num(Math.round(maxDown * 100) / 100.0) + " §8" + downWhat + "§7）");
+        if (gone > 0) s.sendMessage("§c现在算不出价的 §e" + gone + " §c个（之前有价）");
+        if (added > 0) s.sendMessage("§7新算出价的 §e" + added + " §7个");
+        s.sendMessage("§a前后对照已导出 → §f" + path);
+        s.sendMessage("§8反悔: §f/xzex anchor " + (on ? "off" : "on"));
+    }
+
     /**
      * /xzex recalc —— 「有配方、但现在吃的是锚点价」的物品，用配方重算一遍做对照。
      *

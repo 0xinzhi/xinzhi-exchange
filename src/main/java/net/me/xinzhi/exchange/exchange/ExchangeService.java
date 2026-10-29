@@ -57,6 +57,8 @@ public final class ExchangeService {
     private final JavaPlugin plugin;
     private final Config config;
     private final PriceBook book;
+    /** 「有配方的锚点交给配方推导」运行期开关（/xzex anchor on|off 可切，写回 config.yml） */
+    private boolean anchorDerive;
     private final PriceEngine engine;
     private MachineTier tier;
     private final RecipeService recipes;
@@ -84,6 +86,7 @@ public final class ExchangeService {
     public ExchangeService(JavaPlugin plugin) {
         this.plugin = plugin;
         this.config = new Config(plugin);
+        this.anchorDerive = this.config.anchorDerive;
         this.book = new PriceBook(plugin);
         this.engine = new PriceEngine();
         this.recipes = new RecipeService(plugin, config);
@@ -321,6 +324,38 @@ public final class ExchangeService {
         return s + " 秒";
     }
 
+    /** 当前这个开关是开还是关 */
+    public boolean anchorDerive() { return anchorDerive; }
+
+    /** 切换「有配方的锚点交给配方推导」，同时写回 config.yml */
+    public void setAnchorDerive(boolean on) {
+        this.anchorDerive = on;
+        try {
+            plugin.getConfig().set("price.anchor-derive", on);
+            plugin.saveConfig();
+        } catch (Throwable t) {
+            plugin.getLogger().warning("[等价交换] 写回 config.yml 失败: " + t);
+        }
+    }
+
+    /**
+     * 实际参与定价的锚点：开了 anchor-derive 就把「自己也有配方」的锚点剔掉，
+     * 让它们回到配方推导。manual 段（玩家/管理员手写价）永远保留。
+     */
+    public Map<ItemKey, Double> effectiveAnchors() {
+        Map<ItemKey, Double> all = book.anchors();
+        if (!anchorDerive) return all;
+        Map<ItemKey, Double> manual = book.manualEntries();
+        Map<ItemKey, Double> out = new LinkedHashMap<>(all.size());
+        for (Map.Entry<ItemKey, Double> e : all.entrySet()) {
+            ItemKey k = e.getKey();
+            if (manual.containsKey(k) || recipes.registry().producersOf(k).isEmpty()) {
+                out.put(k, e.getValue());
+            }
+        }
+        return out;
+    }
+
     /**
      * 诊断（腐竹 2026-10-29「石英块咋是 36，不应该是 16 吗」）：
      * 把一批「目前吃锚点价」的物品临时当成没有锚点，用现有配方重算一遍，返回各自的推导价。
@@ -351,7 +386,7 @@ public final class ExchangeService {
     public void rebuildPrices(String reason) {
         try {
             book.applyEmbedded();       // 运行期注册的附属值也要生效（不必重读 prices.yml）
-            engine.rebuild(recipes.registry(), book.anchors(), config.staged, tier,
+            engine.rebuild(recipes.registry(), effectiveAnchors(), config.staged, tier,
                     config.requireMachine ? this::isFreeMachine : null, geoDefaults(), dropDefaults(),
                     new PriceEngine.SellRules(config.compressedSellCap, config.compressedKeywords,
                             config.generatorSellRate, config.generatorKeywords));
