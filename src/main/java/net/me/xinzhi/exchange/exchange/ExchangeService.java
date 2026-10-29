@@ -17,6 +17,7 @@ import net.me.xinzhi.exchange.price.BlockDropPrices;
 import net.me.xinzhi.exchange.price.MachineTier;
 import net.me.xinzhi.exchange.price.MobDropPrices;
 import net.me.xinzhi.exchange.price.PriceBook;
+import net.me.xinzhi.exchange.recipe.VanillaRecipeExtractor;
 import net.me.xinzhi.exchange.price.PriceEngine;
 import net.me.xinzhi.exchange.recipe.RecipeRegistry;
 import net.me.xinzhi.exchange.recipe.RecipeService;
@@ -176,6 +177,14 @@ public final class ExchangeService {
 
         // 原版配方索引（腐竹 2026-10-29：用来挑出「原版·无配方」的物品，让它们能手工定价）
         VanillaRecipes.rescan();
+        // 原版配方进价图（腐竹 2026-10-29）：没这一步，原版物品只有锚点、永远不走配方推导
+        try {
+            int nv = VanillaRecipeExtractor.ensureRegistered(recipes.registry());
+            plugin.getLogger().info("[等价交换] 原版配方已接入价图: 新注册 " + nv + " 条 / 共 "
+                    + VanillaRecipeExtractor.size() + " 条变体");
+        } catch (Throwable t) {
+            plugin.getLogger().warning("[等价交换] 原版配方接入失败: " + t);
+        }
 
         listener = new ExchangeGuiListener(plugin, manager, gui, viewStore);
         Bukkit.getPluginManager().registerEvents(listener, plugin);
@@ -390,6 +399,7 @@ public final class ExchangeService {
     public void rebuildPrices(String reason) {
         try {
             book.applyEmbedded();       // 运行期注册的附属值也要生效（不必重读 prices.yml）
+            VanillaRecipeExtractor.ensureRegisteredIfReady(recipes.registry());
             engine.rebuild(recipes.registry(), effectiveAnchors(), config.staged, tier,
                     config.requireMachine ? this::isFreeMachine : null, geoDefaults(), dropDefaults(),
                     new PriceEngine.SellRules(config.compressedSellCap, config.compressedKeywords,
