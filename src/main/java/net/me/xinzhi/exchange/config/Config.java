@@ -31,8 +31,8 @@ public final class Config {
     public final boolean requireMachine;
     /**
      * 「有配方的锚点交给配方推导」（腐竹 2026-10-29「我觉得可以直接换了」）。
-     * 打开后：prices.yml / 内置表里凡是自己也有配方的物品，不再用表里的价，
-     * 改由配方算；manual 段（/xzex set 或批量定价写的）永远保留，不受影响。
+     * 打开后：prices.yml / 内置表里凡是「原版材质且自己也有配方」的，不再用表里的价，
+     * 改由配方算；粘液（附属）物品的锚点与 manual 段手工价永远保留，不受影响。
      */
     public final boolean anchorDerive;
 

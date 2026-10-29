@@ -887,15 +887,16 @@ public final class ExchangeCommand implements CommandExecutor, TabCompleter {
     /**
      * /xzex anchor [on|off] —— 「有配方的物品交给配方推导」的总开关。
      *
-     * <p>腐竹 2026-10-29 看过 /xzex recalc 对照后说「我觉得可以直接换了」：
-     * 打开后 prices.yml / 内置表里凡是自己也有配方的物品都不再吃表里的价，
-     * 改由配方算（石英块自动变成 16）；manual 段的手工价保留。
+     * <p>腐竹 2026-10-29 看过 /xzex recalc 对照后说「我觉得可以直接换了」，
+     * 随后补口径「我只是希望原版物品里有配方的改为推导，不要动粘液物品的锚点」：
+     * 只把「原版 + 自己也有配方」的物品交给配方推导（石英块自动变成 16），
+     * 粘液物品的锚点、manual 段手工价都不动。
      * 切换时会导出一份前后对照 diag/anchor-switch.tsv，方便反悔。
      */
     private void anchorMode(CommandSender s, String[] args) {
         if (args.length < 2) {
-            s.sendMessage("§6有配方物品的定价方式: " + (svc.anchorDerive()
-                    ? "§a由配方推导 §8（表里的价不再压着它，手工价除外）"
+            s.sendMessage("§6原版·有配方物品的定价方式: " + (svc.anchorDerive()
+                    ? "§a由配方推导 §8（粘液物品与手工价不受影响）"
                     : "§e用表里的价 §8（锚点优先，配方只给没定价的算）"));
             s.sendMessage("§7用法: §f/xzex anchor on §7= 交给配方推导　§f/xzex anchor off §7= 恢复用表里的价");
             return;

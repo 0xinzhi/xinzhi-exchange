@@ -339,8 +339,11 @@ public final class ExchangeService {
     }
 
     /**
-     * 实际参与定价的锚点：开了 anchor-derive 就把「自己也有配方」的锚点剔掉，
-     * 让它们回到配方推导。manual 段（玩家/管理员手写价）永远保留。
+     * 实际参与定价的锚点：开了 anchor-derive 就把「自己也有配方」的**原版**物品剔掉，
+     * 让它们回到配方推导。粘液（附属）物品的锚点一律不动，manual 段手工价也不动。
+     *
+     * <p>腐竹 2026-10-29 补充口径：「我只是希望原版物品里有配方的改为推导，
+     * 不要动粘液物品的锚点」。
      */
     public Map<ItemKey, Double> effectiveAnchors() {
         Map<ItemKey, Double> all = book.anchors();
@@ -349,7 +352,8 @@ public final class ExchangeService {
         Map<ItemKey, Double> out = new LinkedHashMap<>(all.size());
         for (Map.Entry<ItemKey, Double> e : all.entrySet()) {
             ItemKey k = e.getKey();
-            if (manual.containsKey(k) || recipes.registry().producersOf(k).isEmpty()) {
+            boolean vanillaWithRecipe = k.isVanilla() && !recipes.registry().producersOf(k).isEmpty();
+            if (!vanillaWithRecipe || manual.containsKey(k)) {
                 out.put(k, e.getValue());
             }
         }
