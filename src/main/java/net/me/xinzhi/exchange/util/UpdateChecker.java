@@ -16,6 +16,7 @@ import java.io.File;
 import java.util.HashSet;
 import java.util.Set;
 import java.util.UUID;
+import java.util.jar.JarFile;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.net.HttpURLConnection;
@@ -114,6 +115,7 @@ public final class UpdateChecker {
         try {
             Bukkit.getScheduler().runTask(plugin, () -> {
                 for (Player p : Bukkit.getOnlinePlayers()) {
+                    if (notified.contains(p.getUniqueId())) continue;
                     boolean admin = p.isOp() || p.hasPermission("xzex.update");
                     if (admin && toAdmins) {
                         p.sendMessage("§e[等价交换] 服务端有新版本 §f" + v + "§e（当前 §f" + cur
@@ -160,6 +162,9 @@ public final class UpdateChecker {
         try {
             String cur = plugin.getPluginMeta().getVersion();
             File dir = new File(plugin.getDataFolder().getParentFile(), "update");
+            // 顺手清掉上次没下完的 .part，半截文件绝不留在 update 里
+            File[] parts = dir.listFiles((d, n) -> n.toLowerCase().endsWith(".part"));
+            if (parts != null) for (File pf : parts) if (pf.delete()) plugin.getLogger().info("[等价交换] 清掉未下完的 " + pf.getName());
             File[] files = dir.listFiles((d, n) -> n.toLowerCase().startsWith(ASSET_PREFIX) && n.toLowerCase().endsWith(".jar"));
             if (files == null) return;
             File best = null;
@@ -169,6 +174,10 @@ public final class UpdateChecker {
                 String ver = n.substring(ASSET_PREFIX.length(), n.length() - 4);
                 if (!ver.matches("\\d+([._-]\\d+)*")) continue;
                 if (compareVersion(ver, cur) <= 0) continue;
+                if (!validJar(f)) {   // 不完整的 jar 不认领，否则关服替换会把服弄起不来
+                    plugin.getLogger().warning("[等价交换] plugins/update/" + n + " 不完整，跳过（下次检查重新下）");
+                    continue;
+                }
                 if (bestVer == null || compareVersion(ver, bestVer) > 0) {
                     best = f;
                     bestVer = ver;
@@ -265,15 +274,13 @@ public final class UpdateChecker {
         if (latest.equalsIgnoreCase(current)) {
             plugin.getLogger().info("[等价交换] 已是最新版本 " + current);
             pendingVersion = null;
+            pendingJar = null;
             saveState(plugin, null);
             return;
         }
-        // 有新版本：先记下来（即使关掉了下载，也要让服里的人知道）
-        pendingVersion = latest;
-        saveState(plugin, latest);
-        announce(plugin);   // 在线的人马上知道，不必等下载完
 
         String url = null, name = null;
+        long assetSize = -1;
         JsonArray assets = root.has("assets") ? root.getAsJsonArray("assets") : null;
         if (assets != null) {
             for (JsonElement el : assets) {
@@ -282,6 +289,9 @@ public final class UpdateChecker {
                 if (an.endsWith(".jar")) {
                     name = an;
                     url = a.has("browser_download_url") ? a.get("browser_download_url").getAsString() : null;
+                    if (a.has("size")) {
+                        try { assetSize = a.get("size").getAsLong(); } catch (Throwable ignored) { assetSize = -1; }
+                    }
                     break;
                 }
             }
@@ -290,9 +300,14 @@ public final class UpdateChecker {
                 + (url == null ? "" : " · " + url));
 
         if (!download || url == null || name == null) {
+            // 不自动下载：手上没有可校验的文件，只能先通知
+            pendingVersion = latest;
+            saveState(plugin, latest);
+            announce(plugin);
             plugin.getLogger().info("[等价交换] 新版未自动下载（update.download = false）");
             return;
         }
+
         // 只落到 plugins/update/，绝不碰正在跑的 jar
         File dir = new File(plugin.getDataFolder().getParentFile(), "update");
         if (!dir.isDirectory() && !dir.mkdirs()) {
@@ -300,22 +315,67 @@ public final class UpdateChecker {
             return;
         }
         File out = new File(dir, name);
-        if (out.isFile() && out.length() > 1024 && latest.equals(pendingVersion)) {
-            pendingJar = out;   // 这轮已经下过了（定时器每 30 分钟跑一次），别反复拉同一个文件
+        if (out.isFile() && validJar(out) && latest.equals(versionOfAssetName(out.getName()))) {
+            pendingJar = out;
+            pendingVersion = latest;
+            saveState(plugin, latest);
+            announce(plugin);
+            plugin.getLogger().info("[等价交换] 新版 " + latest + " 已在 plugins/update/" + name + "，关服后替换");
             return;
         }
-        HttpURLConnection d = (HttpURLConnection) new URL(url).openConnection();
-        d.setRequestProperty("User-Agent", "XinZhiExchange/" + current);
-        d.setConnectTimeout(10000);
-        d.setReadTimeout(30000);
-        try (InputStream in = d.getInputStream()) {
-            Files.copy(in, out.toPath(), StandardCopyOption.REPLACE_EXISTING);
+
+        // 腐竹 2026-10-29「等下载完再提示」：先下到 .part，大小与 zip 结构都过了才改名并提示；
+        // 半截文件绝不留在这两个位置（他被截断的 jar 卡住过一次起不来服）。
+        File part = new File(dir, name + ".part");
+        try {
+            HttpURLConnection d = (HttpURLConnection) new URL(url).openConnection();
+            d.setRequestProperty("User-Agent", "XinZhiExchange/" + current);
+            d.setConnectTimeout(10000);
+            d.setReadTimeout(30000);
+            try (InputStream in = d.getInputStream()) {
+                Files.copy(in, part.toPath(), StandardCopyOption.REPLACE_EXISTING);
+            }
+            long len = part.length();
+            if (assetSize > 0 && len != assetSize) {
+                throw new java.io.IOException("大小不符（下到 " + len + " 字节，发布的是 " + assetSize + " 字节）");
+            }
+            if (!validJar(part)) throw new java.io.IOException("zip 结构不完整（没有中央目录）");
+            try {
+                Files.move(part.toPath(), out.toPath(),
+                        StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+            } catch (java.nio.file.AtomicMoveNotSupportedException e) {
+                Files.move(part.toPath(), out.toPath(), StandardCopyOption.REPLACE_EXISTING);
+            }
+        } catch (Throwable t) {
+            part.delete();
+            plugin.getLogger().warning("[等价交换] 新版 " + latest + " 下载或校验失败，这次不提示也不替换（下次检查会重试）: " + t);
+            return;
         }
+
         pendingJar = out;
+        pendingVersion = latest;
+        saveState(plugin, latest);
+        announce(plugin);   // 文件已就位，这时候才让人重启
         plugin.getLogger().info("[等价交换] 新版 " + latest + " 已下载到 plugins/update/" + name
                 + (plugin.getConfig().getBoolean("update.auto-install", true)
                         ? "，关服后自动替换，下次启动生效"
                         : "，需手动替换（update.auto-install = false）"));
+    }
+
+    /** jar 是不是完整可读（能被 JarFile 打开 = 有中央目录，才算下完）。 */
+    private static boolean validJar(File f) {
+        if (f == null || !f.isFile() || f.length() < 1024) return false;
+        try (JarFile jf = new JarFile(f)) {
+            return jf.size() > 0;
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    /** xinzhi-exchange-<版本>.jar → 版本 */
+    private static String versionOfAssetName(String name) {
+        String base = name.endsWith(".jar") ? name.substring(0, name.length() - 4) : name;
+        return base.startsWith(ASSET_PREFIX) ? base.substring(ASSET_PREFIX.length()) : "";
     }
 
     /**
@@ -333,6 +393,10 @@ public final class UpdateChecker {
             next = pendingJar;
         }
         if (next == null || !next.isFile()) return;
+        if (!validJar(next)) {
+            plugin.getLogger().warning("[等价交换] " + next.getName() + " 不完整，跳过自动安装（旧 jar 保留）");
+            return;
+        }
         try {
             if (!plugin.getConfig().getBoolean("update.auto-install", true)) return;
             File self = selfJar(plugin);
@@ -402,7 +466,8 @@ public final class UpdateChecker {
             + "ping -n 7 127.0.0.1 >nul\r\n"
             + "for /L %%i in (1,1,45) do (\r\n"
             + "  if not exist \"%NEW%\" goto end\r\n"
-            + "  copy /Y \"%NEW%\" \"%OLD%\" >nul 2>&1\r\n"
+            + "  copy /Y \"%NEW%\" \"%OLD%.tmp\" >nul 2>&1\r\n"
+            + "  move /Y \"%OLD%.tmp\" \"%OLD%\" >nul 2>&1\r\n"
             + "  if not errorlevel 1 (\r\n"
             + "    del \"%NEW%\" >nul 2>&1\r\n"
             + "    if not \"%~3\"==\"\" del \"%~3\" >nul 2>&1\r\n"
@@ -422,7 +487,7 @@ public final class UpdateChecker {
             + "i=0\n"
             + "while [ $i -lt 45 ]; do\n"
             + "  if [ ! -f \"$NEW\" ]; then exit 0; fi\n"
-            + "  if cp -f \"$NEW\" \"$OLD\" 2>/dev/null; then rm -f \"$NEW\"; [ -n \"$3\" ] && rm -f \"$3\"; exit 0; fi\n"
+            + "  if cp -f \"$NEW\" \"$OLD.tmp\" 2>/dev/null && mv -f \"$OLD.tmp\" \"$OLD\" 2>/dev/null; then rm -f \"$NEW\"; [ -n \"$3\" ] && rm -f \"$3\"; exit 0; fi\n"
             + "  i=$((i+1)); sleep 2\n"
             + "done\n"
             + "exit 1\n";
