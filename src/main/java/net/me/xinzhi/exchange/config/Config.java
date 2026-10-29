@@ -35,6 +35,11 @@ public final class Config {
      * 改由配方算；粘液（附属）物品的锚点与 manual 段手工价永远保留，不受影响。
      */
     public final boolean anchorDerive;
+    /**
+     * 机器引导（0.4.8）：定价前先忽略「机器没价就不报价」跑一趟，只取机器键的价当种子。
+     * 关掉的话附属机器的配方会因为没有机器价而全部不参与定价。
+     */
+    public final boolean machineBootstrap;
 
     /**
      * 配方机器黑名单（腐竹 2026-10-18 点名 LOGITECH_CARD_MAKER）：
@@ -208,6 +213,7 @@ public final class Config {
         this.staged = c.getBoolean("price.staged", true);
         this.requireMachine = c.getBoolean("price.require-machine", true);
         this.anchorDerive = c.getBoolean("price.anchor-derive", true);
+        this.machineBootstrap = c.getBoolean("price.machine-bootstrap", true);
 
         java.util.Set<String> black = new java.util.LinkedHashSet<>();
         for (String s : c.getStringList("scan.machine-blacklist")) {

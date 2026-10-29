@@ -383,6 +383,7 @@ public final class ExchangeService {
         Map<ItemKey, Double> a = new LinkedHashMap<>(book.anchors());
         for (ItemKey k : candidates) a.remove(k);
         PriceEngine tmp = new PriceEngine();
+        tmp.setMachineBootstrap(config.machineBootstrap);
         tmp.rebuild(recipes.registry(), a, config.staged, tier,
                 config.requireMachine ? this::isFreeMachine : null, geoDefaults(), dropDefaults(), null);
         Map<ItemKey, Double> out = new LinkedHashMap<>();
@@ -400,10 +401,28 @@ public final class ExchangeService {
         try {
             book.applyEmbedded();       // 运行期注册的附属值也要生效（不必重读 prices.yml）
             VanillaRecipeExtractor.ensureRegisteredIfReady(recipes.registry());
-            engine.rebuild(recipes.registry(), effectiveAnchors(), config.staged, tier,
-                    config.requireMachine ? this::isFreeMachine : null, geoDefaults(), dropDefaults(),
-                    new PriceEngine.SellRules(config.compressedSellCap, config.compressedKeywords,
-                            config.generatorSellRate, config.generatorKeywords));
+            engine.setMachineBootstrap(config.machineBootstrap);
+            Map<ItemKey, Double> eff = new LinkedHashMap<>(effectiveAnchors());
+            PriceEngine.SellRules sellRules = new PriceEngine.SellRules(config.compressedSellCap,
+                    config.compressedKeywords, config.generatorSellRate, config.generatorKeywords);
+            engine.rebuild(recipes.registry(), eff, config.staged, tier,
+                    config.requireMachine ? this::isFreeMachine : null, geoDefaults(), dropDefaults(), sellRules);
+            // ⭐ anchor-derive 的兜底：被「交给配方推导」剔掉、但配方其实算不出价的物品
+            // （典型：原版锁链甲 —— 没有配方材料链，剔掉锚点后反而从 20 变成没价）
+            List<ItemKey> restore = new ArrayList<>();
+            for (Map.Entry<ItemKey, Double> e : book.anchors().entrySet()) {
+                ItemKey k = e.getKey();
+                if (k == null || !k.isVanilla() || eff.containsKey(k)) continue;
+                if (engine.hasPrice(k)) continue;
+                restore.add(k);
+            }
+            if (!restore.isEmpty()) {
+                for (ItemKey k : restore) eff.put(k, book.anchors().get(k));
+                engine.rebuild(recipes.registry(), eff, config.staged, tier,
+                        config.requireMachine ? this::isFreeMachine : null, geoDefaults(), dropDefaults(), sellRules);
+                plugin.getLogger().info("[等价交换] 推导不出价的锚点已恢复 " + restore.size()
+                        + " 个（否则它们会从「有价」变成 0）");
+            }
             manager.refreshCatalog();
             planner.invalidate();
             priceVersion++;
@@ -423,6 +442,7 @@ public final class ExchangeService {
                     + "；机器依赖 " + (config.requireMachine
                         ? "开（机器没价 ⇒ 它的配方不报价，跳过 " + engine.machineBlockedRecipes() + " 条）"
                         : "关")
+                    + "；机器引导 " + engine.machineBootstrapped() + " 台"
                     + "；严格顺序（抬到早期附属配方）" + engine.orderForcedCount() + " 个物品"
                     + "；耗时 " + engine.lastBuildMillis() + " ms"
                     + "；手续费 " + config.tax);

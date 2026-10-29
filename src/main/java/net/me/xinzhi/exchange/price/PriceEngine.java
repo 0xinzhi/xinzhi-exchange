@@ -103,6 +103,9 @@ public final class PriceEngine {
     private int stage2Count;
     private int machineBlocked;
     private int orderForced;
+    /** 机器引导开关（见 {@link #bootstrapMachines}）；默认开 */
+    private boolean machineBootstrap = true;
+    private int machineBootstrapped;
 
     // ============================================================
 
@@ -125,6 +128,10 @@ public final class PriceEngine {
     public int machineBlockedRecipes() { return machineBlocked; }
     /** 有多少个物品因为「读取顺序更靠前的附属也造得出」而被抬到早期配方的成本（腐竹 m01739） */
     public int orderForcedCount() { return orderForced; }
+    /** 机器引导出来的机器价台数（0.4.8） */
+    public int machineBootstrapped() { return machineBootstrapped; }
+    /** 是否在定价前先给「当机器用的那些物品」算一轮价（默认开） */
+    public void setMachineBootstrap(boolean v) { this.machineBootstrap = v; }
     public int pricedCount() { return prices.size(); }
 
     public boolean hasPrice(ItemKey k) { return k != null && prices.containsKey(k); }
@@ -255,6 +262,12 @@ public final class PriceEngine {
         List<Recipe> all = new ArrayList<>(registry == null ? List.of() : registry.all());
         recipeTotal = all.size();
 
+        // 0) 机器引导：先把「当机器用的那些物品」的价算出来，再按正常门槛跑
+        machineBootstrapped = 0;
+        Map<ItemKey, Double> machineSeed = machineBootstrap
+                ? bootstrapMachines(all, gate, anchors, geoDefaults, dropDefaults) : Map.of();
+        machineBootstrapped = machineSeed.size();
+
         // 1~1.7) 锚点 / 地理默认 → 配方推导，⭐ 严格按附属读取顺序迭代（见 orderForcedPrices）
         Map<ItemKey, Double> forced = new LinkedHashMap<>();
         Map<ItemKey, Recipe> forcedRecipes = new LinkedHashMap<>();
@@ -276,6 +289,7 @@ public final class PriceEngine {
             }
             fillGeo(normal, normalDer, geoDefaults);
             seedDrops(normal, normalDer, dropDefaults);          // ⭐ 掉落价先当种子，让下游配方能算出来
+            seedMachinePrices(normal, normalDer, machineSeed);   // ⭐ 机器引导价：让它们的配方能参与报价
             buildAll(all, staged, tier, gate, normal, normalDer);
             if (staged) { normalStage1 = stage1Count; normalStage2 = stage2Count; }
 
@@ -327,6 +341,7 @@ public final class PriceEngine {
             fillAnchors(sell, sellDer, sellAnchors);
             fillGeo(sell, sellDer, geoDefaults);
             seedDrops(sell, sellDer, dropDefaults);
+            seedMachinePrices(sell, sellDer, machineSeed);
             for (Map.Entry<ItemKey, Double> e : forced.entrySet()) sell.putIfAbsent(e.getKey(), e.getValue());
             buildAll(all, staged, tier, gate, sell, sellDer);
             sell.replaceAll((k, v) -> {
@@ -539,6 +554,51 @@ public final class PriceEngine {
             if (!(v > 0) || Double.isNaN(v) || Double.isInfinite(v)) continue;
             sink.put(k, v);
             der.put(k, new Derivation(Origin.GEO, v, null));
+        }
+    }
+
+    /**
+     * 机器引导（0.4.8）：先把「当机器用的那些物品」的价算出来。
+     *
+     * <p>为什么需要：附属机器的造价配方通常挂在<b>别的</b>机器上，而那些机器自己也没价 ——
+     * 于是「机器没价 ⇒ 它的配方不报价」把所有附属配方一起锁死（测试服实测
+     * 14,145 条里被跳过 13,934 条、算不出 3,153 个物品，连粘液盔甲都成了 0）。
+     *
+     * <p>做法：只忽略机器门槛跑一趟，<b>只取机器键的价</b>当种子（不碰别的物品的定价），
+     * 再让正常那一趟带上这些种子。种子价永远输给真实锚点（{@code putIfAbsent}）。
+     */
+    private Map<ItemKey, Double> bootstrapMachines(List<Recipe> all, Predicate<ItemKey> gate,
+                                                   Map<ItemKey, Double> anchors,
+                                                   Map<ItemKey, Double> geoDefaults,
+                                                   Map<ItemKey, Double> dropDefaults) {
+        Set<ItemKey> machines = new HashSet<>(64);
+        for (Recipe r : all) {
+            ItemKey m = r.getMachine();
+            if (m != null && !gate.test(m)) machines.add(m);
+        }
+        if (machines.isEmpty()) return Map.of();
+        Map<ItemKey, Double> tmp = new HashMap<>(16384);
+        Map<ItemKey, Derivation> tmpDer = new HashMap<>(16384);
+        fillAnchors(tmp, tmpDer, anchors);
+        fillGeo(tmp, tmpDer, geoDefaults);
+        seedDrops(tmp, tmpDer, dropDefaults);
+        runPass(all, k -> true, tmp, tmpDer);
+        Map<ItemKey, Double> out = new LinkedHashMap<>();
+        for (ItemKey m : machines) {
+            Double v = tmp.get(m);
+            if (v != null && v > 0) out.put(m, v);
+        }
+        return out;
+    }
+
+    /** 把机器引导价塞进价表（只补空缺：真实锚点 / 已定的价优先） */
+    private void seedMachinePrices(Map<ItemKey, Double> pm, Map<ItemKey, Derivation> dm,
+                                   Map<ItemKey, Double> machineSeed) {
+        if (machineSeed == null || machineSeed.isEmpty()) return;
+        for (Map.Entry<ItemKey, Double> e : machineSeed.entrySet()) {
+            if (pm.containsKey(e.getKey())) continue;
+            pm.put(e.getKey(), e.getValue());
+            dm.put(e.getKey(), new Derivation(Origin.RECIPE, e.getValue(), null));
         }
     }
 
