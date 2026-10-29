@@ -39,7 +39,8 @@ import java.nio.file.StandardCopyOption;
  * 替换只发生在关服之后，且脚本自带重试，失败就留着旧 jar（服还能起）。
  *
  * <p>配置（config.yml）：update.check（默认开）、update.repo、update.download（默认开 = 查到就下到 plugins/update）、
- * update.auto-install（默认开 = 关服时自动换掉旧 jar）。
+ * update.auto-install（默认开 = 关服时自动换掉旧 jar）、update.interval-minutes（默认 30 = 开服期间每 30 分钟再查一次，
+ * 0 = 只在启动时查）。腐竹 2026-10-29：「能否在服务器启动中时就时不时检查是否有新版本呢？也好进行下载下次重启直接替换就行。」
  */
 public final class UpdateChecker {
 
@@ -54,6 +55,12 @@ public final class UpdateChecker {
     /** 本轮已经提示过的玩家，避免每次进服都念一遍同一句。 */
     private static final Set<UUID> notified = new HashSet<>();
 
+    /** 防止两次检查叠在一起（30 分钟的定时器碰上手动 /xzex scan 之类）。 */
+    private static volatile boolean checking;
+
+    /** plugins/update 里已经下好的新版 jar 的固定前缀（Release 资产名 xinzhi-exchange-<版本>.jar）。 */
+    private static final String ASSET_PREFIX = "xinzhi-exchange-";
+
     public static void start(JavaPlugin plugin) {
         try {
             if (!plugin.getConfig().getBoolean("update.check", true)) return;
@@ -64,13 +71,26 @@ public final class UpdateChecker {
             if (plugin.getConfig().getBoolean("update.notify.on-join", true)) {
                 Bukkit.getPluginManager().registerEvents(new JoinNotice(), plugin);
             }
-            Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
+            // 上次关服前已经下好、但没换成的新 jar：这次启动就认领它，关服时照常替换
+            recoverPending(plugin);
+
+            Runnable task = () -> {
                 try {
                     check(plugin, repo, download);
                 } catch (Throwable t) {
                     plugin.getLogger().fine("[等价交换] 更新检查失败（不影响使用）: " + t);
                 }
-            });
+            };
+            Bukkit.getScheduler().runTaskAsynchronously(plugin, task);
+
+            // 开服期间也时不时看一眼（腐竹 2026-10-29）：查到就下到 plugins/update，
+            // 下次正常关服直接替换，不用等下一次启服才拿到新版。
+            int minutes = plugin.getConfig().getInt("update.interval-minutes", 30);
+            if (minutes > 0) {
+                long ticks = Math.max(1, minutes) * 60L * 20L;
+                Bukkit.getScheduler().runTaskTimerAsynchronously(plugin, task, ticks, ticks);
+                plugin.getLogger().info("[等价交换] 更新检查：启动时一次，之后每 " + Math.max(1, minutes) + " 分钟一次");
+            }
         } catch (Throwable t) {
             plugin.getLogger().fine("[等价交换] 更新检查未启动: " + t);
         }
@@ -132,6 +152,58 @@ public final class UpdateChecker {
         }
     }
 
+    /**
+     * 认领 plugins/update 里已经下好的新版 jar（腐竹 2026-10-29 的场景：
+     * 上一轮开着服就下载好了，但关服是被强杀的，替换脚本没跑成；这次启动要接着用）。
+     */
+    private static void recoverPending(JavaPlugin plugin) {
+        try {
+            String cur = plugin.getPluginMeta().getVersion();
+            File dir = new File(plugin.getDataFolder().getParentFile(), "update");
+            File[] files = dir.listFiles((d, n) -> n.toLowerCase().startsWith(ASSET_PREFIX) && n.toLowerCase().endsWith(".jar"));
+            if (files == null) return;
+            File best = null;
+            String bestVer = null;
+            for (File f : files) {
+                String n = f.getName();
+                String ver = n.substring(ASSET_PREFIX.length(), n.length() - 4);
+                if (!ver.matches("\\d+([._-]\\d+)*")) continue;
+                if (compareVersion(ver, cur) <= 0) continue;
+                if (bestVer == null || compareVersion(ver, bestVer) > 0) {
+                    best = f;
+                    bestVer = ver;
+                }
+            }
+            if (best == null) return;
+            pendingJar = best;
+            pendingVersion = bestVer;
+            saveState(plugin, bestVer);
+            plugin.getLogger().info("[等价交换] plugins/update 里已有新版 " + bestVer + "（当前 " + cur
+                    + "），关服时自动替换，下次启动生效");
+        } catch (Throwable ignored) {}
+    }
+
+    /** 比较点分版本号：a>b 返回正数。非数字段当 0，够用即可。 */
+    private static int compareVersion(String a, String b) {
+        String[] x = a.split("[._-]");
+        String[] y = b.split("[._-]");
+        int n = Math.max(x.length, y.length);
+        for (int i = 0; i < n; i++) {
+            int xi = i < x.length ? parseIntSafe(x[i]) : 0;
+            int yi = i < y.length ? parseIntSafe(y[i]) : 0;
+            if (xi != yi) return xi - yi;
+        }
+        return 0;
+    }
+
+    private static int parseIntSafe(String s) {
+        try {
+            return Integer.parseInt(s.trim());
+        } catch (NumberFormatException e) {
+            return 0;
+        }
+    }
+
     private static File stateFile(JavaPlugin plugin) {
         return new File(plugin.getDataFolder(), "update-state.yml");
     }
@@ -160,6 +232,16 @@ public final class UpdateChecker {
     }
 
     private static void check(JavaPlugin plugin, String repo, boolean download) throws Exception {
+        if (checking) return;
+        checking = true;
+        try {
+            doCheck(plugin, repo, download);
+        } finally {
+            checking = false;
+        }
+    }
+
+    private static void doCheck(JavaPlugin plugin, String repo, boolean download) throws Exception {
         String current = plugin.getPluginMeta().getVersion();
         HttpURLConnection c = (HttpURLConnection) new URL(
                 "https://api.github.com/repos/" + repo + "/releases/latest").openConnection();
@@ -218,6 +300,10 @@ public final class UpdateChecker {
             return;
         }
         File out = new File(dir, name);
+        if (out.isFile() && out.length() > 1024 && latest.equals(pendingVersion)) {
+            pendingJar = out;   // 这轮已经下过了（定时器每 30 分钟跑一次），别反复拉同一个文件
+            return;
+        }
         HttpURLConnection d = (HttpURLConnection) new URL(url).openConnection();
         d.setRequestProperty("User-Agent", "XinZhiExchange/" + current);
         d.setConnectTimeout(10000);
@@ -242,6 +328,10 @@ public final class UpdateChecker {
      */
     public static void installOnShutdown(JavaPlugin plugin) {
         File next = pendingJar;
+        if (next == null || !next.isFile()) {
+            recoverPending(plugin);   // 定时器可能刚下完还没认领（或 state 被清过），关服前再找一遍
+            next = pendingJar;
+        }
         if (next == null || !next.isFile()) return;
         try {
             if (!plugin.getConfig().getBoolean("update.auto-install", true)) return;

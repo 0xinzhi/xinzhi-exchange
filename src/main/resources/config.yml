@@ -219,6 +219,9 @@ update:
   check: true
   # 仓库 owner/name
   repo: 0xinzhi/xinzhi-exchange
+  # 开服期间也要时不时查一次（分钟；0 = 只在启动时查）。
+  # 查到就下到 plugins/update/，下次正常关服直接替换，不用等下一轮启服才拿到。
+  interval-minutes: 30
   # true = 查到新版顺手下载到 plugins/update/，重启服务器后生效（默认开）
   # 下载只落到 plugins/update/，绝不热替换正在运行的 jar（版本不配套会让服起不来）
   download: true
