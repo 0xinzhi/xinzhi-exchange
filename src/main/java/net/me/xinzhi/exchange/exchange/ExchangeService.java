@@ -20,6 +20,7 @@ import net.me.xinzhi.exchange.price.PriceBook;
 import net.me.xinzhi.exchange.price.PriceEngine;
 import net.me.xinzhi.exchange.recipe.RecipeRegistry;
 import net.me.xinzhi.exchange.recipe.RecipeService;
+import net.me.xinzhi.exchange.recipe.VanillaRecipes;
 import net.me.xinzhi.exchange.util.ChatInput;
 import net.me.xinzhi.exchange.util.GuiItems;
 import net.me.xinzhi.exchange.util.Text;
@@ -169,6 +170,9 @@ public final class ExchangeService {
                     + "（扫描完成前只显示基础定价表里的物品）");
             rebuildPrices("启动（仅基础定价表，等扫描）");
         }
+
+        // 原版配方索引（腐竹 2026-10-29：用来挑出「原版·无配方」的物品，让它们能手工定价）
+        VanillaRecipes.rescan();
 
         listener = new ExchangeGuiListener(plugin, manager, gui, viewStore);
         Bukkit.getPluginManager().registerEvents(listener, plugin);

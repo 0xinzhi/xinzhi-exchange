@@ -3,6 +3,7 @@ package net.me.xinzhi.exchange.exchange;
 import net.me.xinzhi.exchange.core.ItemKey;
 import net.me.xinzhi.exchange.price.PriceEngine;
 import net.me.xinzhi.exchange.recipe.Recipe;
+import net.me.xinzhi.exchange.recipe.VanillaRecipes;
 import net.me.xinzhi.exchange.util.Dialogs;
 import net.me.xinzhi.exchange.util.GuiItems;
 import net.me.xinzhi.exchange.util.Text;
@@ -84,6 +85,8 @@ public final class PricingAdminGui {
     public static final int F_NO_ANCHOR = 12;
     public static final int F_VANILLA = 14;
     public static final int F_SLIMEFUN = 16;
+    /** 原版·无配方（腐竹 2026-10-29）：拿不到任何原版配方，价只能手工给 */
+    public static final int F_NORECIPE = 18;
     public static final int F_BACK = 22;
 
     private final ExchangeService svc;
@@ -241,7 +244,7 @@ public final class PricingAdminGui {
                 "§7右键清单物品: §c从清单移除"));
         inv.setItem(B_FILTER, GuiItems.of(Material.SPYGLASS, "§d🔍 快捷筛选",
                 "§7从全服物品里挑一批进清单",
-                "§7未定价 / 无锚点 / 原版 / 粘液"));
+                "§7未定价 / 无锚点 / 原版 / 粘液 / 原版·无配方"));
         inv.setItem(B_SORT, GuiItems.of(Material.HOPPER, "§e排序: §f" + (byPrice ? "按价格" : "按名称"),
                 "§7点一下切换"));
         if (pg > 0) inv.setItem(B_PREV, GuiItems.of(Material.ARROW, "§e上一页"));
@@ -274,6 +277,10 @@ public final class PricingAdminGui {
         Double pending = s.get(key);
         lore.add(pending == null ? "§7待保存: §c未填价" : "§7待保存: §a" + Text.money2(pending));
         lore.add("§7当前生效价: §f" + Text.money2(svc.engine().priceOf(key)));
+        Material vm = key.isVanilla() ? key.getMaterial() : null;
+        if (vm != null && !VanillaRecipes.hasRecipe(vm)) {
+            lore.add("§8原版·无配方 §7（只能手工定价）");
+        }
         lore.add("");
         lore.add("§a[左键] §7单独定价");
         lore.add("§c[右键] §7从清单移除");
@@ -296,6 +303,12 @@ public final class PricingAdminGui {
                 "§7所有可发放的原版材质"));
         inv.setItem(F_SLIMEFUN, GuiItems.of(Material.CARROT, "§b🔍 粘液物品",
                 "§7所有已注册的粘液科技物品"));
+        List<Material> noRecipe = VanillaRecipes.withoutRecipe();
+        inv.setItem(F_NORECIPE, GuiItems.of(Material.CRAFTING_TABLE, "§6🔍 原版·无配方",
+                "§7没有任何原版配方能产出它们",
+                "§7价只能手工给 —— 整张原版价图的根",
+                "§8共 §f" + noRecipe.size() + " §8个",
+                "§7点一下全部进清单"));
         inv.setItem(F_BACK, GuiItems.of(Material.BARRIER, "§c返回"));
         p.openInventory(inv);
     }
@@ -428,6 +441,12 @@ public final class PricingAdminGui {
         } else if (kind == 2) {       // 原版
             for (Material m : Material.values()) {
                 if (!m.isItem() || m.isAir()) continue;
+                ItemKey k = ItemKey.vanilla(m);
+                if (k == null) continue;
+                if (s.putIfAbsent(k, null) == null) added++;
+            }
+        } else if (kind == 4) {       // 原版·无配方
+            for (Material m : VanillaRecipes.withoutRecipe()) {
                 ItemKey k = ItemKey.vanilla(m);
                 if (k == null) continue;
                 if (s.putIfAbsent(k, null) == null) added++;

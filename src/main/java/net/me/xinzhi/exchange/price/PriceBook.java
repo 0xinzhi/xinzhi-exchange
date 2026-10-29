@@ -197,7 +197,8 @@ public final class PriceBook {
         }
     }
 
-    private static boolean isTechnical(Material m) {
+    /** 技术方块（没有「物品」意义的原版方块）。VanillaRecipes 也按这个口径过滤，所以是 public。 */
+    public static boolean isTechnical(Material m) {
         return switch (m) {
             case AIR, CAVE_AIR, VOID_AIR, COMMAND_BLOCK, CHAIN_COMMAND_BLOCK,
                  REPEATING_COMMAND_BLOCK, STRUCTURE_BLOCK, STRUCTURE_VOID, BARRIER,

@@ -4,6 +4,7 @@ import io.github.thebusybiscuit.slimefun4.api.items.SlimefunItem;
 import net.me.xinzhi.exchange.core.ItemKey;
 import net.me.xinzhi.exchange.price.PriceEngine;
 import net.me.xinzhi.exchange.recipe.Recipe;
+import net.me.xinzhi.exchange.recipe.VanillaRecipes;
 import net.me.xinzhi.exchange.util.Text;
 import org.bukkit.Bukkit;
 import org.bukkit.Material;
@@ -20,6 +21,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -29,7 +31,8 @@ public final class ExchangeCommand implements CommandExecutor, TabCompleter {
 
     private static final List<String> SUBS = List.of(
             "help", "info", "price", "why", "roots", "top", "scan", "rebuild", "reload",
-            "export", "set", "unset", "balance", "give", "admin", "menu", "emc", "limit", "craft");
+            "export", "set", "unset", "balance", "give", "admin", "menu", "emc", "limit", "craft",
+            "norecipe");
 
     private final JavaPlugin plugin;
     private final ExchangeService svc;
@@ -75,10 +78,15 @@ public final class ExchangeCommand implements CommandExecutor, TabCompleter {
                     s.sendMessage("§c[等价交换] 正在扫描中，请稍候");
                     return true;
                 }
+                VanillaRecipes.rescan();
                 s.sendMessage("§7[等价交换] 开始全量扫描配方库…（完成后会打印一行结果）");
                 svc.rescan(() -> s.sendMessage("§a[等价交换] 扫描完成："
                         + svc.registry().size() + " 条配方 / "
                         + svc.registry().machines().size() + " 台机器"));
+            }
+            case "norecipe" -> {
+                if (!viewAll(s)) return true;
+                noRecipe(s, args);
             }
             case "rebuild" -> {
                 if (!admin(s)) return true;
@@ -304,6 +312,7 @@ public final class ExchangeCommand implements CommandExecutor, TabCompleter {
         s.sendMessage("§7/xzex why <物品|光标> §f它为什么没价 / 卡在哪");
         s.sendMessage("§7/xzex roots [n] §f断链的根 §8（仅管理）");
         s.sendMessage("§7/xzex top [n] §f最贵的 n 个物品 §8（仅管理）");
+        s.sendMessage("§7/xzex norecipe [n|add] §f原版·无配方的物品（只能手工定价）§8（仅管理）");
         s.sendMessage("§7/xzex balance [玩家] §f查余额");
         s.sendMessage("§7/xzex menu [on|off] §f开关超级菜单（客户端装 mod 才生效）");
         s.sendMessage("§c—— 管理 ——");
@@ -844,6 +853,110 @@ public final class ExchangeCommand implements CommandExecutor, TabCompleter {
         svc.manager().addBalance(target.getUniqueId(), amount);
         s.sendMessage("§a[等价交换] " + target.getName() + " 现在有 §e"
                 + Text.num(svc.manager().balance(target.getUniqueId())));
+    }
+
+    // ============================================================
+    // 原版·无配方清单
+    // ============================================================
+
+    /**
+     * 列出「原版物品里没有任何配方能产出」的那些（腐竹 2026-10-29 原话：
+     * 「能列出原版物品中没有合成配方的物品让我自行定价吗？或者制作一个扫描道具让我在游戏中定价也行」）。
+     *
+     * <p>为什么是「无配方」这一批：价表给所有原版材质都垫了 1.0 兜底，配方又只收粘液的，
+     * 所以原版物品的价实际上全是手工/内置表拍进去的。真正<b>非拍不可</b>的，就是这批
+     * 连原版配方都没有的物品 —— 它们撑起整张原版价图，改一个会顺价传下去。
+     *
+     * <p>用法：
+     * <ul>
+     *   <li>{@code /xzex norecipe} 前 30 条（按当前价降序）+ 导出完整清单</li>
+     *   <li>{@code /xzex norecipe 100} 看前 100 条</li>
+     *   <li>{@code /xzex norecipe add} 全部丢进批量定价面板，直接在里面填价</li>
+     * </ul>
+     */
+    private void noRecipe(CommandSender s, String[] args) {
+        List<Material> all = new ArrayList<>(VanillaRecipes.withoutRecipe());
+        int size = all.size();
+
+        if (!VanillaRecipes.scanned()) {
+            s.sendMessage("§c[等价交换] 原版配方索引还没建好（服务端不支持配方迭代或扫描失败），清单不可信");
+            if (VanillaRecipes.failed()) return;
+        }
+
+        if (args.length >= 2 && args[1].equalsIgnoreCase("add")) {
+            if (!(s instanceof Player p)) { s.sendMessage("§c这条要在游戏里用"); return; }
+            LinkedHashMap<ItemKey, Double> session = svc.pricingGui().session(p);
+            int added = 0;
+            for (Material m : all) {
+                ItemKey k = ItemKey.vanilla(m);
+                if (k == null) continue;
+                if (session.putIfAbsent(k, null) == null) added++;
+            }
+            svc.pricingGui().openBatch(p, 0);
+            p.sendMessage("§a[等价交换] 已把 §e" + added + " §a个「原版·无配方」物品加进批量定价清单"
+                    + "（清单共 §e" + session.size() + " §a个）");
+            p.sendMessage("§7左键逐个填价，或 §f💰统一定价§7，最后 §f✔保存并应用§7 才生效");
+            return;
+        }
+
+        int limit = 30;
+        if (args.length >= 2) {
+            try { limit = Math.max(1, Math.min(200, Integer.parseInt(args[1]))); }
+            catch (NumberFormatException ignored) { }
+        }
+
+        // 按当前价降序：贵的在上面，改它们的收益最大
+        all.sort(Comparator.comparingDouble(m -> {
+            ItemKey k = ItemKey.vanilla(m);
+            return k == null ? 0 : -svc.engine().priceOf(k);
+        }));
+
+        s.sendMessage("§6===== 原版·无配方 §8(" + size + " 个) §6=====");
+        int flat = 0;
+        int shown = 0;
+        for (Material m : all) {
+            ItemKey k = ItemKey.vanilla(m);
+            if (k == null) continue;
+            double v = svc.engine().priceOf(k);
+            String origin = svc.book().originOf(k);
+            boolean fallback = "builtin".equals(origin) && Math.abs(v - 1.0) < 1e-9;
+            if (fallback) flat++;
+            if (shown >= limit) continue;
+            shown++;
+            s.sendMessage("§7" + shown + ". §f" + k.getDisplayName() + " §8(" + m.name() + ") §7价 §e"
+                    + Text.num(v) + (fallback ? " §8兜底 1.0" : " §8" + origin));
+        }
+        if (size > shown) {
+            s.sendMessage("§8… 还有 " + (size - shown) + " 个没显示（§7/xzex norecipe " + size + "§8 看全部）");
+        }
+        s.sendMessage("§7其中 §e" + flat + " §7个还在内置兜底价 §e1.0 §7（等于没定过价）");
+        s.sendMessage("§a完整清单已导出 → §f" + writeNoRecipe(all));
+        s.sendMessage("§8游戏内直接定价: §f/xzex norecipe add");
+    }
+
+    /** 写 diag/vanilla-norecipe.tsv（tab 分隔：key / name / price / origin） */
+    private String writeNoRecipe(List<Material> all) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("# 等价交换（独立版）原版·无配方清单\n");
+        sb.append("# 没有任何原版配方（工作台/熔炉/高炉/烟熏/切石机/锻造台/营火）能产出它们，价只能手工给\n");
+        sb.append("# key\tname\tprice\torigin\n");
+        for (Material m : all) {
+            ItemKey k = ItemKey.vanilla(m);
+            if (k == null) continue;
+            sb.append(k).append('\t')
+              .append(Text.plain(k.getDisplayName())).append('\t')
+              .append(svc.engine().priceOf(k)).append('\t')
+              .append(svc.book().originOf(k)).append('\n');
+        }
+        try {
+            File dir = new File(plugin.getDataFolder(), "diag");
+            if (!dir.exists() && !dir.mkdirs()) return "(无法创建 diag 目录)";
+            File out = new File(dir, "vanilla-norecipe.tsv");
+            Files.write(out.toPath(), sb.toString().getBytes(StandardCharsets.UTF_8));
+            return out.getPath();
+        } catch (Throwable t) {
+            return "(导出失败: " + t + ")";
+        }
     }
 
     // ============================================================

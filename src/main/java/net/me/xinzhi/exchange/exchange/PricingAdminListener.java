@@ -100,6 +100,7 @@ public final class PricingAdminListener implements Listener {
             case PricingAdminGui.F_NO_ANCHOR -> gui.filter(p, 1);
             case PricingAdminGui.F_VANILLA -> gui.filter(p, 2);
             case PricingAdminGui.F_SLIMEFUN -> gui.filter(p, 3);
+            case PricingAdminGui.F_NORECIPE -> gui.filter(p, 4);
             case PricingAdminGui.F_BACK -> gui.openBatch(p, 0);
             default -> { }
         }
