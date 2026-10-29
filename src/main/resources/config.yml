@@ -81,7 +81,7 @@ price:
   # 原版·有配方的物品：true = 由配方推导（石英块自动变成 16）；粘液物品的锚点不动
   # 手动写的价（manual 段、批量定价面板）永远保留，不受此项影响
   # 服主 2026-10-29 决定改用它；想恢复旧行为 /xzex anchor off
-  anchor-derive: false
+  anchor-derive: true
 
 scan:
   # 启动后是否自动全量扫描配方库

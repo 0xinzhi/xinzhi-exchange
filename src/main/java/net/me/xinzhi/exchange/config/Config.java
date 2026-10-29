@@ -207,7 +207,7 @@ public final class Config {
         this.rejectModified = c.getBoolean("price.reject-modified-items", true);
         this.staged = c.getBoolean("price.staged", true);
         this.requireMachine = c.getBoolean("price.require-machine", true);
-        this.anchorDerive = c.getBoolean("price.anchor-derive", false);
+        this.anchorDerive = c.getBoolean("price.anchor-derive", true);
 
         java.util.Set<String> black = new java.util.LinkedHashSet<>();
         for (String s : c.getStringList("scan.machine-blacklist")) {
