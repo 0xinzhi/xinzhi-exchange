@@ -321,6 +321,30 @@ public final class ExchangeService {
         return s + " 秒";
     }
 
+    /**
+     * 诊断（腐竹 2026-10-29「石英块咋是 36，不应该是 16 吗」）：
+     * 把一批「目前吃锚点价」的物品临时当成没有锚点，用现有配方重算一遍，返回各自的推导价。
+     *
+     * <p>为什么要单独跑一个 PriceEngine：锚点优先级高于配方推导，直接改现有引擎会把
+     * 全服价格换掉。这里用临时实例算完就丢，线上价表一个字节都不动。
+     *
+     * @param candidates 要试算的物品（通常是「有配方但当前是锚点价」的那些）
+     * @return 能推出来的 key → 推导价；推不出来的不在表里
+     */
+    public Map<ItemKey, Double> derivationWithoutAnchors(java.util.Collection<ItemKey> candidates) {
+        Map<ItemKey, Double> a = new LinkedHashMap<>(book.anchors());
+        for (ItemKey k : candidates) a.remove(k);
+        PriceEngine tmp = new PriceEngine();
+        tmp.rebuild(recipes.registry(), a, config.staged, tier,
+                config.requireMachine ? this::isFreeMachine : null, geoDefaults(), dropDefaults(), null);
+        Map<ItemKey, Double> out = new LinkedHashMap<>();
+        for (ItemKey k : candidates) {
+            double v = tmp.priceOf(k);
+            if (v > 0) out.put(k, v);
+        }
+        return out;
+    }
+
     /** 重建价表（配方库 / 定价表变了就调） */
     public void rebuildPrices() { rebuildPrices("手动"); }
 

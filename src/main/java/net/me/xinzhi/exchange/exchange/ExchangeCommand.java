@@ -32,7 +32,7 @@ public final class ExchangeCommand implements CommandExecutor, TabCompleter {
     private static final List<String> SUBS = List.of(
             "help", "info", "price", "why", "roots", "top", "scan", "rebuild", "reload",
             "export", "set", "unset", "balance", "give", "admin", "menu", "emc", "limit", "craft",
-            "norecipe");
+            "norecipe", "recalc");
 
     private final JavaPlugin plugin;
     private final ExchangeService svc;
@@ -83,6 +83,10 @@ public final class ExchangeCommand implements CommandExecutor, TabCompleter {
                 svc.rescan(() -> s.sendMessage("§a[等价交换] 扫描完成："
                         + svc.registry().size() + " 条配方 / "
                         + svc.registry().machines().size() + " 台机器"));
+            }
+            case "recalc" -> {
+                if (!viewAll(s)) return true;
+                recalc(s, args);
             }
             case "norecipe" -> {
                 if (!viewAll(s)) return true;
@@ -313,6 +317,7 @@ public final class ExchangeCommand implements CommandExecutor, TabCompleter {
         s.sendMessage("§7/xzex roots [n] §f断链的根 §8（仅管理）");
         s.sendMessage("§7/xzex top [n] §f最贵的 n 个物品 §8（仅管理）");
         s.sendMessage("§7/xzex norecipe [n|add] §f原版·无配方的物品（只能手工定价）§8（仅管理）");
+        s.sendMessage("§7/xzex recalc [n] §f有配方但吃锚点价的物品，用配方试算一遍做对照（只读）§8（仅管理）");
         s.sendMessage("§7/xzex balance [玩家] §f查余额");
         s.sendMessage("§7/xzex menu [on|off] §f开关超级菜单（客户端装 mod 才生效）");
         s.sendMessage("§c—— 管理 ——");
@@ -874,6 +879,89 @@ public final class ExchangeCommand implements CommandExecutor, TabCompleter {
      *   <li>{@code /xzex norecipe add} 全部丢进批量定价面板，直接在里面填价</li>
      * </ul>
      */
+    /**
+     * /xzex recalc —— 「有配方、但现在吃的是锚点价」的物品，用配方重算一遍做对照。
+     *
+     * <p>腐竹 2026-10-29 的原话：「石英是 4，石英块咋是 36，不应该是 16 吗？」
+     * 根因是 prices.yml 里每一条都是锚点，锚点压过配方推导。这条命令就是拿来看
+     * 「如果不压，配方会算成多少」，只读，不改任何价。
+     */
+    private void recalc(CommandSender s, String[] args) {
+        List<ItemKey> cand = new ArrayList<>();
+        for (ItemKey k : svc.book().anchors().keySet()) {
+            if (svc.registry().producersOf(k).isEmpty()) continue;
+            cand.add(k);
+        }
+        if (cand.isEmpty()) { s.sendMessage("§7[等价交换] 没有「既有配方又吃锚点价」的物品"); return; }
+
+        long t0 = System.currentTimeMillis();
+        Map<ItemKey, Double> derived = svc.derivationWithoutAnchors(cand);
+        long cost = System.currentTimeMillis() - t0;
+
+        List<RecalcRow> rows = new ArrayList<>();
+        for (ItemKey k : cand) {
+            Double now = derived.get(k);
+            if (now == null) continue;              // 去掉它自己的锚点后还是推不出来（配方里要它自己）
+            rows.add(new RecalcRow(k, svc.engine().priceOf(k), now));
+        }
+        rows.sort(Comparator.comparingDouble(r -> -Math.abs(Math.log(Math.max(1e-9, r.ratio)))));
+
+        int limit = 20;
+        if (args.length >= 2) {
+            try { limit = Math.max(1, Math.min(200, Integer.parseInt(args[1]))); } catch (NumberFormatException ignored) { }
+        }
+
+        s.sendMessage("§6===== 锚定价 vs 配方推导 §8(试算 " + rows.size() + " 个，耗时 " + cost + "ms) §6=====");
+        int shown = 0, big = 0;
+        for (RecalcRow r : rows) {
+            if (Math.abs(r.ratio - 1) > 0.25) big++;
+            if (shown >= limit) continue;
+            shown++;
+            s.sendMessage("§7" + shown + ". §f" + Text.plain(r.k.getDisplayName())
+                    + " §8现 §e" + Text.num(r.cur) + " §8→ 推导 §a" + Text.num(r.now)
+                    + " §8(×" + Text.num(Math.round(r.ratio * 100) / 100.0) + ") §7" + svc.book().originOf(r.k));
+        }
+        if (rows.size() > shown) s.sendMessage("§8… 还有 " + (rows.size() - shown) + " 个（§7/xzex recalc " + rows.size() + "§8）");
+        s.sendMessage("§7偏离超过 25% 的共 §e" + big + " §7个");
+        s.sendMessage("§a完整对照已导出 → §f" + writeRecalc(rows));
+        s.sendMessage("§8只读试算：现在的价一个都没改");
+    }
+
+    private String writeRecalc(List<RecalcRow> rows) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("# 等价交换｜锚定价 vs 配方推导 试算（只读，不改价）\n");
+        sb.append("# 口径：把这些物品的锚点临时去掉，用现有配方重算一遍\n");
+        sb.append("# key\tname\tcurrent\tderived\tratio\torigin\trecipes\n");
+        for (RecalcRow r : rows) {
+            sb.append(r.k).append('\t').append(Text.plain(r.k.getDisplayName())).append('\t')
+                    .append(r.cur).append('\t').append(r.now).append('\t')
+                    .append(r.cur <= 0 ? "" : Math.round(r.ratio * 1000) / 1000.0).append('\t')
+                    .append(svc.book().originOf(r.k)).append('\t')
+                    .append(svc.registry().producersOf(r.k).size()).append('\n');
+        }
+        File dir = new File(plugin.getDataFolder(), "diag");
+        if (!dir.exists()) dir.mkdirs();
+        File out = new File(dir, "anchor-vs-recipe.tsv");
+        try {
+            Files.write(out.toPath(), sb.toString().getBytes(StandardCharsets.UTF_8));
+            return out.getPath();
+        } catch (Throwable t) {
+            return "写文件失败: " + t;
+        }
+    }
+
+    /** 一行试算结果：现价 / 去掉锚点后的推导价 */
+    private static final class RecalcRow {
+        final ItemKey k;
+        final double cur;
+        final double now;
+        final double ratio;
+        RecalcRow(ItemKey k, double cur, double now) {
+            this.k = k; this.cur = cur; this.now = now;
+            this.ratio = cur <= 0 ? Double.MAX_VALUE : now / cur;
+        }
+    }
+
     private void noRecipe(CommandSender s, String[] args) {
         List<Material> all = new ArrayList<>(VanillaRecipes.withoutRecipe());
         int size = all.size();
