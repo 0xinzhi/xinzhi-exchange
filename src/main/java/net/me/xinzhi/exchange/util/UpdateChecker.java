@@ -38,8 +38,8 @@ import java.nio.file.StandardCopyOption;
  * <p>两条安全线：<b>绝不热替换正在运行的 jar</b>（版本和 Slimefun 核心不配套会让服直接起不来）；
  * 替换只发生在关服之后，且脚本自带重试，失败就留着旧 jar（服还能起）。
  *
- * <p>配置（config.yml）：update.check（默认开）、update.repo、update.download（默认关 = 只提示不下载）、
- * update.auto-install（默认关 = 只下到 plugins/update 不自动换）。
+ * <p>配置（config.yml）：update.check（默认开）、update.repo、update.download（默认开 = 查到就下到 plugins/update）、
+ * update.auto-install（默认开 = 关服时自动换掉旧 jar）。
  */
 public final class UpdateChecker {
 
@@ -58,7 +58,7 @@ public final class UpdateChecker {
         try {
             if (!plugin.getConfig().getBoolean("update.check", true)) return;
             String repo = plugin.getConfig().getString("update.repo", "0xinzhi/xinzhi-exchange");
-            boolean download = plugin.getConfig().getBoolean("update.download", false);
+            boolean download = plugin.getConfig().getBoolean("update.download", true);
             loadState(plugin);
             // 进服提示一直挂着（配置 update.notify.on-join）：管理员上线时把「有新版」告诉他
             if (plugin.getConfig().getBoolean("update.notify.on-join", true)) {
@@ -227,7 +227,7 @@ public final class UpdateChecker {
         }
         pendingJar = out;
         plugin.getLogger().info("[等价交换] 新版 " + latest + " 已下载到 plugins/update/" + name
-                + (plugin.getConfig().getBoolean("update.auto-install", false)
+                + (plugin.getConfig().getBoolean("update.auto-install", true)
                         ? "，关服后自动替换，下次启动生效"
                         : "，需手动替换（update.auto-install = false）"));
     }
@@ -244,7 +244,7 @@ public final class UpdateChecker {
         File next = pendingJar;
         if (next == null || !next.isFile()) return;
         try {
-            if (!plugin.getConfig().getBoolean("update.auto-install", false)) return;
+            if (!plugin.getConfig().getBoolean("update.auto-install", true)) return;
             File self = selfJar(plugin);
             if (self == null || !self.isFile()) {
                 plugin.getLogger().warning("[等价交换] 找不到插件自己的 jar，跳过自动安装");
