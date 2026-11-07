@@ -36,6 +36,13 @@ public final class Recipe {
     private int priority = Integer.MAX_VALUE;
     private int id = -1;
     private String fingerprint;
+    private String body;
+    /**
+     * 「原版镜像配方」（0.4.23）：输入输出与某条机器为原版的配方完全一致，
+     * 只是被别的附属搬到了自家机器上（最终科技的快捷工作台把原版配方照抄了一遍）。
+     * 定价时按原版口径对待 —— 否则那些「原版工作台能合、配方却被镜像机器占着」的物品会被静默判死。
+     */
+    private volatile boolean vanillaMirror;
 
     public Recipe(ItemKey machine, Map<ItemKey, Integer> inputs,
                   Map<ItemKey, Integer> outputs, String source) {
@@ -70,6 +77,19 @@ public final class Recipe {
         fingerprint = String.join("|", parts);
         return fingerprint;
     }
+
+    /** 不含机器的「输入→输出」签名：用来认出「同一组配方被另一台机器镜像了一份」 */
+    public String getBody() {
+        if (body != null) return body;
+        TreeSet<String> parts = new TreeSet<>();
+        inputs.forEach((k, v) -> parts.add("I:" + k + ":" + v));
+        outputs.forEach((k, v) -> parts.add("O:" + k + ":" + v));
+        body = String.join("|", parts);
+        return body;
+    }
+
+    public boolean isVanillaMirror() { return vanillaMirror; }
+    public void setVanillaMirror(boolean v) { vanillaMirror = v; }
 
     /** 输入与输出有交集 = 自环 / 复制机 */
     public boolean isSelfLoop() {

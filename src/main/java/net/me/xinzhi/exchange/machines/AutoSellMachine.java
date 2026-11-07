@@ -24,10 +24,17 @@ import java.util.Map;
 import java.util.UUID;
 
 /**
- * 自动卖出机：每 5 秒把输入槽里能卖的东西按卖价卖掉，钱进机主余额，收 1% 手续费。
+ * 自动卖出机：每个周期把输入槽里能卖的东西按卖价卖掉，钱进机主余额，收 1% 手续费。
  *
- * <p>间隔做成 5 秒（100 tick）是腐竹定的：「有充足的时间进行 emc 值计算」。
- * 单价第一次用到时写进机器（{@link MachineUtil}），之后不再查价表。
+ * <p>间隔是配置项 {@code machine.sell.interval-ticks}（默认 3 tick）。
+ * 单价走 {@link MachineUtil} 的进程内缓存：同一种物品一个周期只查一次。
+ *
+ * <p>2026-10-30 提速（腐竹：「首先要减少查询次数」）：
+ * <ul>
+ *   <li>整块界面一次 {@code getContents()} 快照，不再逐格 {@code getItemInSlot}；</li>
+ *   <li>同一周期内按 {@link ItemKey} 去重查价 —— 45 格同款只查 1 次；</li>
+ *   <li>没有 ItemMeta 的原版物品必然是原样，跳过整次模板深比较。</li>
+ * </ul>
  */
 public final class AutoSellMachine extends AbstractMachine {
 
@@ -43,6 +50,8 @@ public final class AutoSellMachine extends AbstractMachine {
 
     /** 周期计数放内存：腐竹 2026-10-26 要求机器别频繁记录，只有一直在操作的物品单价才写盘 */
     private final Map<Location, Integer> counters = new HashMap<>();
+    /** 上周期画出去的状态：内容没变就不重画（省掉每周期 2 个带 lore 的 CustomItemStack） */
+    private final Map<Location, String> lastRender = new HashMap<>();
     /** 默认 1 秒一次；腐竹 2026-10-19 反馈 5 秒太慢，改成配置项 machine.sell.interval-ticks */
 
     public AutoSellMachine(ItemGroup group, SlimefunItemStack item,
@@ -76,6 +85,7 @@ public final class AutoSellMachine extends AbstractMachine {
 
     @Override
     public void onMenuOpen(@Nonnull BlockMenu menu, @Nonnull Block b) {
+        lastRender.remove(b.getLocation());
         render(menu, b.getLocation(), "§7待机", 0);
     }
 
@@ -104,21 +114,36 @@ public final class AutoSellMachine extends AbstractMachine {
             return;
         }
 
+        // 一次拿整块界面：比 45 次 getItemInSlot 便宜得多（腐竹 2026-10-30 降载）
+        ItemStack[] contents;
+        try {
+            contents = menu.getContents();
+        } catch (Throwable t) {
+            return;
+        }
+        if (contents == null) return;
+
         double gross = 0;
         long count = 0;
+        // 本周期去重价表：同一种物品只查一次（成批卖出时 45 格 → 1 次）
+        Map<ItemKey, Double> prices = new HashMap<>(16);
         for (int slot : INPUT) {
             // 老机器可能还是 27 格界面（尺寸在第一次建菜单时就定了）：越界直接跳过
-            ItemStack it;
-            try {
-                it = menu.getItemInSlot(slot);
-            } catch (Throwable t) {
-                continue;
-            }
+            if (slot >= contents.length) break;
+            ItemStack it = contents[slot];
             if (it == null || it.getType().isAir()) continue;
             ItemKey k = ItemKey.of(it);
             if (k == null) continue;
-            if (!ItemGuard.pristine(k, it)) continue;
-            double unit = MachineUtil.sellUnit(loc, k);
+            // 没有任何 ItemMeta 的原版物品必然是原样（改名/附魔/lore 都会带 meta），省一次深比较
+            if (it.hasItemMeta() && !ItemGuard.pristine(k, it)) continue;
+            Double cached = prices.get(k);
+            double unit;
+            if (cached != null) {
+                unit = cached;
+            } else {
+                unit = MachineUtil.sellUnit(loc, k);
+                prices.put(k, unit);
+            }
             if (!(unit > 0)) continue;
             gross += unit * it.getAmount();
             count += it.getAmount();
@@ -140,10 +165,16 @@ public final class AutoSellMachine extends AbstractMachine {
         double balance = 0;
         ExchangeService svc = ExchangeService.get();
         if (svc != null && owner != null) balance = svc.manager().balances().get(owner);
+        String ownerName = MachineUtil.ownerName(owner);
+        // 内容没变就不重画（腐竹 2026-10-30 降载）：空机器每周期都重建物品太浪费
+        String key = status + "|" + lastGain + "|" + balance + "|" + ownerName;
+        if (key.equals(lastRender.get(loc))) return;
+        lastRender.put(loc, key);
         try {
             menu.replaceExistingItem(STATUS, new CustomItemStack(Material.CLOCK, "§7状态", "§7" + status));
             menu.replaceExistingItem(BALANCE, new CustomItemStack(Material.EMERALD, "§6机主余额 §f" + fmt(balance),
-                    lastGain > 0 ? "§7本次入账 §f" + fmt(lastGain) : "§7—"));
+                    lastGain > 0 ? "§7本次入账 §f" + fmt(lastGain) : "§7—",
+                    "§7机主 §f" + ownerName));
         } catch (Throwable ignored) {
         }
     }

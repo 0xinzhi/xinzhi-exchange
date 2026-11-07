@@ -19,6 +19,8 @@ public final class RecipeRegistry {
     private final Map<ItemKey, List<Integer>> byMachine = new ConcurrentHashMap<>();
     private final Map<ItemKey, List<Integer>> producedBy = new ConcurrentHashMap<>();
     private final Map<ItemKey, List<Integer>> consumedBy = new ConcurrentHashMap<>();
+    /** 不含机器的「输入→输出」签名 → 配方 id（0.4.23，认原版镜像配方用） */
+    private final Map<String, List<Integer>> byBody = new ConcurrentHashMap<>();
     private final Object lock = new Object();
     private final CopyOnWriteArrayList<ChangeListener> listeners = new CopyOnWriteArrayList<>();
     private int nextId = 0;
@@ -58,6 +60,7 @@ public final class RecipeRegistry {
             for (ItemKey k : recipe.getOutputs().keySet()) {
                 producedBy.computeIfAbsent(k, x -> new ArrayList<>()).add(id);
             }
+            linkBody(recipe, id);
         }
         return true;
     }
@@ -76,6 +79,8 @@ public final class RecipeRegistry {
             byMachine.computeIfAbsent(incoming.getMachine(), k -> new ArrayList<>()).add(existingId);
             for (ItemKey k : incoming.getInputs().keySet()) consumedBy.computeIfAbsent(k, x -> new ArrayList<>()).add(existingId);
             for (ItemKey k : incoming.getOutputs().keySet()) producedBy.computeIfAbsent(k, x -> new ArrayList<>()).add(existingId);
+            removeFrom(byBody, old.getBody(), existingId);
+            linkBody(incoming, existingId);
             return false;
         }
     }
@@ -105,6 +110,7 @@ public final class RecipeRegistry {
                 removeFrom(byMachine, r.getMachine(), id);
                 for (ItemKey k : r.getInputs().keySet()) removeFrom(consumedBy, k, id);
                 for (ItemKey k : r.getOutputs().keySet()) removeFrom(producedBy, k, id);
+                removeFrom(byBody, r.getBody(), id);
                 n++;
             }
         }
@@ -112,17 +118,44 @@ public final class RecipeRegistry {
         return n;
     }
 
-    private static void removeFrom(Map<ItemKey, List<Integer>> index, ItemKey key, int id) {
+    private static <K> void removeFrom(Map<K, List<Integer>> index, K key, int id) {
         List<Integer> list = index.get(key);
         if (list == null) return;
         list.remove(Integer.valueOf(id));
         if (list.isEmpty()) index.remove(key);
     }
 
+    /**
+     * 维护「不含机器」的同配方索引，并给镜像配方打标（0.4.23）。
+     *
+     * <p>同输入同输出里只要有一条的机器是原版的，其余就是「原版镜像」——
+     * 不点名任何附属：谁把原版配方照抄到自家机器上都会被认出来。
+     * 反过来也一样：原版那条后注册时，先把已有的镜像标上。
+     */
+    private void linkBody(Recipe r, int id) {
+        String body = r.getBody();
+        List<Integer> list = byBody.computeIfAbsent(body, x -> new ArrayList<>());
+        boolean selfVanilla = r.getMachine() != null && r.getMachine().isVanilla();
+        for (int other : list) {
+            Recipe o = byId.get(other);
+            if (o == null) continue;
+            if (selfVanilla) o.setVanillaMirror(true);
+            else if (o.getMachine() != null && o.getMachine().isVanilla()) r.setVanillaMirror(true);
+        }
+        list.add(id);
+    }
+
+    /** 被识别成「原版镜像」的配方数（诊断用） */
+    public int vanillaMirrorCount() {
+        int n = 0;
+        for (Recipe r : byId.values()) if (r.isVanillaMirror()) n++;
+        return n;
+    }
+
     public void clear() {
         synchronized (lock) {
             byId.clear(); byFp.clear(); byMachine.clear();
-            producedBy.clear(); consumedBy.clear(); nextId = 0;
+            producedBy.clear(); consumedBy.clear(); byBody.clear(); nextId = 0;
         }
         notifyChanged();
     }

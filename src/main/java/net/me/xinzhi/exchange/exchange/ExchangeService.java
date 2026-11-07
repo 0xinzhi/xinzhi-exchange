@@ -17,6 +17,7 @@ import net.me.xinzhi.exchange.price.BlockDropPrices;
 import net.me.xinzhi.exchange.price.MachineTier;
 import net.me.xinzhi.exchange.price.MobDropPrices;
 import net.me.xinzhi.exchange.price.PriceBook;
+import net.me.xinzhi.exchange.recipe.Recipe;
 import net.me.xinzhi.exchange.recipe.VanillaRecipeExtractor;
 import net.me.xinzhi.exchange.price.PriceEngine;
 import net.me.xinzhi.exchange.recipe.RecipeRegistry;
@@ -35,9 +36,12 @@ import org.bukkit.plugin.java.JavaPlugin;
 import java.io.File;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * 生命周期与接线：价表 / 配方库 / 余额 / 界面 / 命令 / 终端道具。
@@ -94,6 +98,8 @@ public final class ExchangeService {
         this.balances = new BalanceStore(plugin);
         this.manager = new ExchangeManager(plugin, config, engine, balances, recipes.registry());
         this.viewStore = new PlayerViewStore(plugin);
+        // 成交 → 记进「历史买卖」（腐竹 2026-11-06：排序改成历史买卖 / 收藏）
+        this.manager.tradeHook(viewStore::markTrade);
         this.gui = new ExchangeGui(plugin, manager, viewStore);
         this.craftGui = new CraftGui(this);
         this.craftPicker = new CraftPickerGui(this, craftGui);
@@ -185,6 +191,10 @@ public final class ExchangeService {
         } catch (Throwable t) {
             plugin.getLogger().warning("[等价交换] 原版配方接入失败: " + t);
         }
+        // 原版配方补扫：有的附属在自己的 enable 或延迟任务里 removeRecipe + addRecipe（实测 LogiTech 的
+        // 快捷工作台就这么干），我们启动时抓到的快照里就没有这些配方 —— 晚了就会「钻石胸甲/楼梯没价」。
+        scheduleVanillaRefresh(60L, "启动 3 秒");
+        scheduleVanillaRefresh(400L, "启动 20 秒");
 
         listener = new ExchangeGuiListener(plugin, manager, gui, viewStore);
         Bukkit.getPluginManager().registerEvents(listener, plugin);
@@ -385,6 +395,7 @@ public final class ExchangeService {
         PriceEngine tmp = new PriceEngine();
         tmp.setMachineBootstrap(config.machineBootstrap);
         tmp.setVanillaFirst(config.vanillaFirst);
+        tmp.setVanillaOnlyVanillaRecipes(config.vanillaOnlyVanillaRecipes);
         tmp.setPaletteMode(config.paletteUnify);
         tmp.rebuild(recipes.registry(), a, config.staged, tier,
                 config.requireMachine ? this::isFreeMachine : null, geoDefaults(), dropDefaults(), null);
@@ -396,6 +407,35 @@ public final class ExchangeService {
         return out;
     }
 
+    /** 该物品的配方是否吃「同样推不出价」的候选：是则它可能只是被上游拖累，先别用回退价锁死 */
+    private boolean hasUnpricedUpstream(ItemKey k, Set<ItemKey> candidates) {
+        for (Recipe r : recipes.registry().producersOf(k)) {
+            if (r == null) continue;
+            Map<ItemKey, Integer> in = r.getInputs();
+            if (in == null) continue;
+            for (ItemKey i : in.keySet()) {
+                if (i != null && !i.equals(k) && candidates.contains(i)) return true;
+            }
+        }
+        return false;
+    }
+
+    /** 延迟补扫原版配方：只有真扫到新配方才重建价表 */
+    private void scheduleVanillaRefresh(long ticks, String tag) {
+        Bukkit.getScheduler().runTaskLater(plugin, () -> {
+            if (!plugin.isEnabled()) return;
+            try {
+                int added = VanillaRecipeExtractor.refresh(recipes.registry());
+                if (added > 0) {
+                    plugin.getLogger().info("[等价交换] 原版配方补扫（" + tag + "）: 新增 " + added + " 条变体");
+                    rebuildPrices("原版配方补扫（" + tag + "）");
+                }
+            } catch (Throwable t) {
+                plugin.getLogger().warning("[等价交换] 原版配方补扫失败（" + tag + "）: " + t);
+            }
+        }, ticks);
+    }
+
     /** 重建价表（配方库 / 定价表变了就调） */
     public void rebuildPrices() { rebuildPrices("手动"); }
 
@@ -405,28 +445,48 @@ public final class ExchangeService {
             VanillaRecipeExtractor.ensureRegisteredIfReady(recipes.registry());
             engine.setMachineBootstrap(config.machineBootstrap);
             engine.setVanillaFirst(config.vanillaFirst);
+            engine.setVanillaOnlyVanillaRecipes(config.vanillaOnlyVanillaRecipes);
             engine.setPaletteMode(config.paletteUnify);
             engine.applySellOverrides(book.sellEntries());
             Map<ItemKey, Double> eff = new LinkedHashMap<>(effectiveAnchors());
             PriceEngine.SellRules sellRules = new PriceEngine.SellRules(config.compressedSellCap,
                     config.compressedKeywords, config.generatorSellRate, config.generatorKeywords);
-            engine.rebuild(recipes.registry(), eff, config.staged, tier,
-                    config.requireMachine ? this::isFreeMachine : null, geoDefaults(), dropDefaults(), sellRules);
-            // ⭐ anchor-derive 的兜底：被「交给配方推导」剔掉、但配方其实算不出价的物品
-            // （典型：原版锁链甲 —— 没有配方材料链，剔掉锚点后反而从 20 变成没价）
-            List<ItemKey> restore = new ArrayList<>();
-            for (Map.Entry<ItemKey, Double> e : book.anchors().entrySet()) {
-                ItemKey k = e.getKey();
+            Map<ItemKey, Double> geo = geoDefaults();
+            Map<ItemKey, Double> drops = dropDefaults();
+            List<ItemKey> candidates = new ArrayList<>();
+            for (ItemKey k : book.anchors().keySet()) {
                 if (k == null || !k.isVanilla() || eff.containsKey(k)) continue;
-                if (engine.hasPrice(k)) continue;
-                restore.add(k);
+                candidates.add(k);
             }
-            if (!restore.isEmpty()) {
-                for (ItemKey k : restore) eff.put(k, book.anchors().get(k));
+            int restoredCount = 0;
+            int rounds = 0;
+            Set<ItemKey> pending = new LinkedHashSet<>(candidates);
+            while (true) {
+                rounds++;
                 engine.rebuild(recipes.registry(), eff, config.staged, tier,
-                        config.requireMachine ? this::isFreeMachine : null, geoDefaults(), dropDefaults(), sellRules);
-                plugin.getLogger().info("[等价交换] 推导不出价的锚点已恢复 " + restore.size()
-                        + " 个（否则它们会从「有价」变成 0）");
+                        config.requireMachine ? this::isFreeMachine : null, geo, drops, sellRules);
+                List<ItemKey> unpriced = new ArrayList<>();
+                for (ItemKey k : pending) {
+                    if (!engine.hasPrice(k)) unpriced.add(k);
+                }
+                if (unpriced.isEmpty() || rounds >= 6) break;
+                // 只补「根」：上游候选都还没价时，别急着用回退价把它锁死（例：生兔肉没价 ⇒ 熟兔肉先别回退，
+                // 否则熔炉配方永远轮不到它）。上游恢复后下一轮它就能靠配方推出真价。
+                Set<ItemKey> up = new HashSet<>(unpriced);
+                List<ItemKey> roots = new ArrayList<>();
+                for (ItemKey k : unpriced) {
+                    if (!hasUnpricedUpstream(k, up)) roots.add(k);
+                }
+                if (roots.isEmpty()) roots = unpriced;
+                for (ItemKey k : roots) {
+                    eff.put(k, book.anchors().get(k));
+                    pending.remove(k);
+                }
+                restoredCount += roots.size();
+            }
+            if (restoredCount > 0) {
+                plugin.getLogger().info("[等价交换] 推导不出价的锚点已恢复 " + restoredCount
+                        + " 个（分 " + rounds + " 轮，只补上游树根；否则它们会从「有价」变成 0）");
             }
             manager.refreshCatalog();
             planner.invalidate();
@@ -669,12 +729,14 @@ public final class ExchangeService {
     /** 重读 prices.yml 后重建 */
     public void reloadPrices() {
         book.reload();
+        VanillaRecipeExtractor.refresh(recipes.registry());
         rebuildPrices("重读 prices.yml");
     }
 
     /** 重扫配方库（异步），结束后重建价表 */
     public void rescan(Runnable done) {
         recipes.scanAsync(n -> {
+            VanillaRecipeExtractor.refresh(recipes.registry());
             rebuildPrices("手动重扫");
             if (done != null) done.run();
         });

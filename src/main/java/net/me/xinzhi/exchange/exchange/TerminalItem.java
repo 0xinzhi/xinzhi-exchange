@@ -20,6 +20,9 @@ import org.bukkit.inventory.meta.ItemMeta;
 import java.util.ArrayList;
 import java.util.List;
 
+import org.bukkit.NamespacedKey;
+import org.bukkit.persistence.PersistentDataType;
+
 /**
  * 「等价交换」终端道具：右键打开兑换界面，潜行右键升级显示上限。
  *
@@ -52,11 +55,51 @@ public final class TerminalItem extends SlimefunItem implements Listener {
     public long defaultCap() { return defaultCap; }
     public long capCeiling() { return capCeiling; }
 
+    /** 记忆在这台终端上的排序模式（腐竹 2026-11-06） */
+    private static NamespacedKey sortKey() {
+        return new NamespacedKey(net.me.xinzhi.exchange.XinZhiExchange.get(), "terminal-sort");
+    }
+
+    /** 是不是等价终端（中级 / 初级都算） */
+    public static boolean isTerminal(ItemStack it) {
+        if (it == null || it.getType().isAir()) return false;
+        return SlimefunItem.getByItem(it) instanceof TerminalItem;
+    }
+
+    /** 读这台终端记着的排序；没记过 = null */
+    public static ExchangeGui.Sort sortMode(ItemStack it) {
+        if (it == null || it.getType().isAir()) return null;
+        ItemMeta meta = it.getItemMeta();
+        if (meta == null) return null;
+        String v = meta.getPersistentDataContainer().get(sortKey(), PersistentDataType.STRING);
+        return v == null ? null : ExchangeGui.Sort.parse(v, null);
+    }
+
+    /**
+     * 把排序写进终端 PDC，顺带刷新 Lore（腐竹 2026-11-06：
+     * 「点击排序时如果主手是等价道具就改pdc为该排序模式下次打开时优先按这个模式打开」）。
+     */
+    public static boolean setSortMode(ItemStack it, ExchangeGui.Sort sort) {
+        if (it == null || it.getType().isAir() || sort == null) return false;
+        ItemMeta meta = it.getItemMeta();
+        if (meta == null) return false;
+        meta.getPersistentDataContainer().set(sortKey(), PersistentDataType.STRING, sort.name());
+        it.setItemMeta(meta);
+        SlimefunItem sf = SlimefunItem.getByItem(it);
+        if (sf instanceof TerminalItem t) t.stamp(it, TradeCap.capOf(it, t.defaultCap), sort);
+        return true;
+    }
+
     /** 物品 Lore：上限随时可变，所以由代码生成 */
     public static List<String> loreFor(long cap, long ceiling) {
+        return loreFor(cap, ceiling, null);
+    }
+
+    public static List<String> loreFor(long cap, long ceiling, ExchangeGui.Sort sort) {
         List<String> l = new ArrayList<>();
         l.add("§7右键打开等价交换界面");
         l.add("§7只显示 §f" + (cap == TradeCap.UNLIMITED ? "不限" : Text.num(cap)) + " §7EMC 以下的物品");
+        if (sort != null) l.add("§8排序: " + sort.label + " §7（界面上点排序可改）");
         if (ceiling == TradeCap.UNLIMITED || cap < ceiling) {
             l.add("§8潜行 + 右键：增加显示上限");
             if (ceiling != TradeCap.UNLIMITED) l.add("§8本级最高 " + Text.num(ceiling));
@@ -68,10 +111,24 @@ public final class TerminalItem extends SlimefunItem implements Listener {
     }
 
     private void stamp(ItemStack item, long cap) {
+        stamp(item, cap, sortMode(item));
+    }
+
+    /**
+     * 一台<b>显示上限无穷</b>的终端（腐竹 2026-11-06：「增加指令获得一个无显示限制的等价道具，
+     * 或者说是显示上限为无穷。」）—— 给管理员发道具用，不受 {@link #capCeiling} 限制。
+     */
+    public ItemStack unlimited() {
+        ItemStack it = getItem().clone();
+        stamp(it, TradeCap.UNLIMITED, sortMode(it));
+        return it;
+    }
+
+    public void stamp(ItemStack item, long cap, ExchangeGui.Sort sort) {
         TradeCap.setCap(item, cap);
         ItemMeta meta = item.getItemMeta();
         if (meta == null) return;
-        meta.setLore(loreFor(cap, capCeiling));
+        meta.setLore(loreFor(cap, capCeiling, sort));
         item.setItemMeta(meta);
     }
 
@@ -97,10 +154,14 @@ public final class TerminalItem extends SlimefunItem implements Listener {
             return;
         }
         long cap = TradeCap.capOf(item, defaultCap);
+        // 排序：终端上记过就用它，没记过用服务器默认（腐竹 2026-11-06）
+        ExchangeGui.Sort sort = sortMode(item);
+        if (sort == null) sort = ExchangeGui.Sort.parse(svc.config().defaultSort, ExchangeGui.Sort.HISTORY);
         // 老物品（升级前发的）补一次 Lore；Lore 变了才写回手持槽
         ItemMeta meta = item.getItemMeta();
-        if (meta == null || !loreFor(cap, capCeiling).equals(meta.getLore())) {
-            stamp(item, cap);
+        if (meta == null || !loreFor(cap, capCeiling, sortMode(item)).equals(meta.getLore())) {
+            // Lore 只反映「这台终端上记着的排序」：没记过就不写排序行，免得每次打开都重写物品
+            stamp(item, cap, sortMode(item));
             if (e.getHand() == org.bukkit.inventory.EquipmentSlot.OFF_HAND) {
                 p.getInventory().setItemInOffHand(item);
             } else {
@@ -112,8 +173,7 @@ public final class TerminalItem extends SlimefunItem implements Listener {
             openUpgrade(svc, p, item, cap);
             return;
         }
-        svc.gui().open(p, 0, ExchangeGui.Sort.parse(svc.config().defaultSort, ExchangeGui.Sort.PRICE_DESC),
-                null, ExchangeGui.Mode.MINE, cap);
+        svc.gui().open(p, 0, sort, null, ExchangeGui.Mode.MINE, cap);
     }
 
     /** 增量升级框：玩家填「加多少」，不是「升到多少」（腐竹 2026-10-26 订正） */

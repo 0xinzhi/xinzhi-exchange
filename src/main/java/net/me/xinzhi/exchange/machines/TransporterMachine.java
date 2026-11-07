@@ -44,6 +44,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * 等价运输机（腐竹 2026-10-26 m00819 / m00888 / m00896 / m00988）。
@@ -84,6 +85,16 @@ public final class TransporterMachine extends AbstractMachine {
     private final Map<Location, Integer> counters = new HashMap<>();
     /** 最近一次结果，只在打开界面时显示（多个实例共用，键是坐标） */
     private static final Map<Location, String> LAST_STATUS = new HashMap<>();
+    /** 上次画出去的内容：没变就不重建那 3 个带 lore 的物品（腐竹 2026-10-30 降载） */
+    private static final Map<Location, String> LAST_RENDER = new ConcurrentHashMap<>();
+    /**
+     * 投料映射的内存缓存。
+     *
+     * <p>腐竹 2026-10-30「首先要减少查询次数」：以前每个周期都要读 54 次 {@code xz-tr-mapN}
+     * 再从字符串解析，大多数机器其实只设了几个槽。现在只在 {@link #saveMappings} 与放置时失效。
+     */
+    private static final Map<Location, Map<Integer, Map.Entry<ItemKey, Integer>>> MAP_CACHE =
+            new ConcurrentHashMap<>();
 
     public TransporterMachine(ItemGroup group, SlimefunItemStack item,
                               RecipeType recipeType, ItemStack[] recipe) {
@@ -94,6 +105,8 @@ public final class TransporterMachine extends AbstractMachine {
                 MachineUtil.setOwner(e.getBlock().getLocation(), e.getPlayer());
                 String above = SynthesisMachine.idOf(e.getBlock().getRelative(BlockFace.UP));
                 if (above != null) MachineUtil.set(e.getBlock().getLocation(), TARGET_KEY, above);
+                // 新机器：旧的映射缓存必须作废（同坐标可能拆了再放）
+                invalidate(e.getBlock().getLocation());
             }
         });
     }
@@ -126,6 +139,7 @@ public final class TransporterMachine extends AbstractMachine {
     static void refresh(Location loc) {
         try {
             if (loc == null) return;
+            LAST_RENDER.remove(loc);
             BlockMenu menu = MachineDrops.menu(loc);
             if (menu == null) return;
             render(menu, loc.getBlock());
@@ -133,33 +147,49 @@ public final class TransporterMachine extends AbstractMachine {
         }
     }
 
+    /** 作废这台机器的内存缓存（映射 / 上次画出去的内容） */
+    static void invalidate(Location loc) {
+        if (loc == null) return;
+        MAP_CACHE.remove(loc);
+        LAST_RENDER.remove(loc);
+    }
+
     static void render(BlockMenu menu, Block b) {
         if (menu == null || b == null) return;
         Location loc = b.getLocation();
         ExchangeService svc = ExchangeService.get();
         UUID owner = MachineUtil.owner(loc);
+        String ownerName = MachineUtil.ownerName(owner);
         double balance = svc != null && owner != null ? svc.manager().balances().get(owner) : 0;
-        SynthesisMachine.Target t = SynthesisMachine.resolve(b);
         String storedId = MachineUtil.info(loc, TARGET_KEY);
-
         Map<Integer, Map.Entry<ItemKey, Integer>> map = mappings(loc);
+        long capNow = MachineUtil.capOf(menu, CAP);
+        // 判「上方机器」只看方块 id：比完整 resolve 便宜，id 变了就一定会重画
+        String aboveId = SynthesisMachine.idOf(b.getRelative(BlockFace.UP));
+        String status = LAST_STATUS.getOrDefault(loc, "§7待机");
+        String key = ownerName + "|" + balance + "|" + map.size() + "|" + storedId + "|" + capNow
+                + "|" + status + "|" + aboveId;
+        // 内容没变就不重建这 3 个带 lore 的物品（空转运输机以前每周期都重画）
+        if (key.equals(LAST_RENDER.get(loc))) return;
+        LAST_RENDER.put(loc, key);
         try {
             List<String> lore = new ArrayList<>();
-            lore.add("§7上方机器: " + (t == null ? "§c没有" : "§f" + t.id));
-            lore.add("§7记录: " + (storedId == null ? "§8—" : (t != null && !storedId.equals(t.id) ? "§c" + storedId + "（不符，待机）" : "§f" + storedId)));
+            lore.add("§7机主 §f" + ownerName);
+            lore.add("§7上方机器: " + (aboveId == null ? "§c没有" : "§f" + aboveId));
+            lore.add("§7记录: " + (storedId == null ? "§8—" : (aboveId != null && !storedId.equals(aboveId) ? "§c" + storedId + "（不符，待机）" : "§f" + storedId)));
             lore.add("§7已设置: §f" + map.size() + " §7个槽位");
             lore.add("§8拖物品进去即时记录");
             menu.replaceExistingItem(OPEN_SETTING, new CustomItemStack(Material.CRAFTING_TABLE, "§e设置投料映射", lore.toArray(new String[0])));
 
             List<String> bl = new ArrayList<>();
+            bl.add("§7机主 §f" + ownerName);
             bl.add("§7机主余额 §f" + SynthesisMachine.fmt(balance) + " §7EMC");
             bl.add("§7每投成功一槽: §f" + SynthesisMachine.fmt(svc == null ? 100 : svc.config().synthesisLogisticsEmcPerSlot) + " EMC");
             menu.replaceExistingItem(BALANCE, new CustomItemStack(Material.EMERALD, "§6机主余额", bl.toArray(new String[0])));
 
             List<String> sl = new ArrayList<>();
-            sl.add("§7" + LAST_STATUS.getOrDefault(loc, "§7待机"));
-            sl.add("§7周期: §f" + (svc == null ? 2 : svc.config().synthesisLogisticsInterval) + " tick");
-            long capNow = MachineUtil.capOf(menu, CAP);
+            sl.add("§7" + status);
+            sl.add("§7周期: §f" + (svc == null ? 3 : svc.config().synthesisLogisticsInterval) + " tick");
             sl.add(capNow == MachineUtil.CAP_MISSING
                     ? "§c第 " + CAP + " 槽未放等价道具：只能用输入槽"
                     : "§7第 " + CAP + " 槽上限 §f"
@@ -295,6 +325,7 @@ public final class TransporterMachine extends AbstractMachine {
             MachineUtil.set(loc, MAP_PREFIX + slot, map.get(slot));
         }
         sh.sizeSaved = map.size();
+        invalidate(loc);
         refresh(loc);
     }
 
@@ -498,74 +529,83 @@ public final class TransporterMachine extends AbstractMachine {
             return "§7还没有设置投料映射（点「设置投料映射」）";
         }
 
-        int aboveSize = sizeOf(t.menu);
+        // 本机输入槽与上方机器各拿一次快照：以前每槽单读、回填时再逐格扫两遍
+        Inputs inputs = new Inputs(menu, loc);
+        ItemStack[] above = snapshot(t.menu);
+        int aboveSize = above.length;
         double perSlot = svc.config().synthesisLogisticsEmcPerSlot;
         // 买东西必须先有等价道具（腐竹 m01476）
         long cap = MachineUtil.capOf(menu, CAP);
         String blockReason = null;
         int done = 0, skipped = 0;
-        for (Map.Entry<Integer, Map.Entry<ItemKey, Integer>> e : map.entrySet()) {
-            int slot = e.getKey();
-            if (slot < 0 || slot >= aboveSize) {
-                skipped++;
-                continue;
-            }
-            ItemKey k = e.getValue().getKey();
-            int want = Math.max(1, e.getValue().getValue());
-            if (k == null) continue;
-            ItemStack existing = itemIn(t.menu, slot);
-            if (existing != null && !existing.getType().isAir()) {
-                skipped++;
-                continue;
-            }
-
-            // ① 先看本机 0~44 输入槽有没有
-            int have = takeFromInputs(menu, k, want);
-            int need = want - have;
-            double cost = perSlot;
-            if (need > 0) {
-                double unit = MachineUtil.buyUnit(loc, k);
-                boolean buyable = unit > 0 && MachineUtil.buyAllowed(cap, unit);
-                if (!buyable) {
-                    if (blockReason == null) {
-                        blockReason = unit <= 0
-                                ? "§7" + SynthesisMachine.shortName(k) + " 买不到"
-                                : (cap == MachineUtil.CAP_MISSING
-                                   ? "§c第 " + CAP + " 槽没放等价道具，买不了 " + SynthesisMachine.shortName(k)
-                                   : "§7" + SynthesisMachine.shortName(k) + " 超出等价道具上限");
-                    }
-                    if (have <= 0) {
-                        skipped++;
-                        continue;
-                    }
-                    need = 0;
-                    want = have;
-                } else {
-                    cost += unit * need;
+        try {
+            for (Map.Entry<Integer, Map.Entry<ItemKey, Integer>> e : map.entrySet()) {
+                int slot = e.getKey();
+                if (slot < 0 || slot >= aboveSize) {
+                    skipped++;
+                    continue;
                 }
-            }
-            if (svc.manager().balances().get(owner) < cost) {
-                if (have > 0) addToInputs(menu, loc, k, have);
-                LAST_STATUS.put(loc, "§7余额不够（这一槽要 " + SynthesisMachine.fmt(cost) + "）");
-                if (done == 0) return "§7余额不够：这一槽要 " + SynthesisMachine.fmt(cost) + " EMC";
-                break;
-            }
-            svc.manager().balances().add(owner, -cost);
+                ItemKey k = e.getValue().getKey();
+                int want = Math.max(1, e.getValue().getValue());
+                if (k == null) continue;
+                ItemStack existing = above[slot];
+                if (existing != null && !existing.getType().isAir()) {
+                    skipped++;
+                    continue;
+                }
 
-            ItemStack out = k.toTemplate();
-            if (out == null || want <= 0) {
-                if (have > 0) addToInputs(menu, loc, k, have);
-                skipped++;
-                continue;
+                // ① 先看本机 0~44 输入槽有没有
+                int have = inputs.take(k, want);
+                int need = want - have;
+                double cost = perSlot;
+                if (need > 0) {
+                    double unit = MachineUtil.buyUnit(loc, k);
+                    boolean buyable = unit > 0 && MachineUtil.buyAllowed(cap, unit);
+                    if (!buyable) {
+                        if (blockReason == null) {
+                            blockReason = unit <= 0
+                                    ? "§7" + SynthesisMachine.shortName(k) + " 买不到"
+                                    : (cap == MachineUtil.CAP_MISSING
+                                       ? "§c第 " + CAP + " 槽没放等价道具，买不了 " + SynthesisMachine.shortName(k)
+                                       : "§7" + SynthesisMachine.shortName(k) + " 超出等价道具上限");
+                        }
+                        if (have <= 0) {
+                            skipped++;
+                            continue;
+                        }
+                        need = 0;
+                        want = have;
+                    } else {
+                        cost += unit * need;
+                    }
+                }
+                if (svc.manager().balances().get(owner) < cost) {
+                    if (have > 0) inputs.put(k, have);
+                    LAST_STATUS.put(loc, "§7余额不够（这一槽要 " + SynthesisMachine.fmt(cost) + "）");
+                    if (done == 0) return "§7余额不够：这一槽要 " + SynthesisMachine.fmt(cost) + " EMC";
+                    break;
+                }
+                svc.manager().balances().add(owner, -cost);
+
+                ItemStack out = k.toTemplate();
+                if (out == null || want <= 0) {
+                    if (have > 0) inputs.put(k, have);
+                    skipped++;
+                    continue;
+                }
+                out = out.clone();
+                out.setAmount(Math.min(want, Math.max(1, out.getMaxStackSize())));
+                if (!putItem(t.menu, slot, out)) {
+                    if (have > 0) inputs.put(k, have);
+                    skipped++;
+                    continue;
+                }
+                above[slot] = out;   // 同一轮里同一格不会再投第二次（映射每个槽最多一条）
+                done++;
             }
-            out = out.clone();
-            out.setAmount(Math.min(want, Math.max(1, out.getMaxStackSize())));
-            if (!putItem(t.menu, slot, out)) {
-                if (have > 0) addToInputs(menu, loc, k, have);
-                skipped++;
-                continue;
-            }
-            done++;
+        } finally {
+            // 无论从哪条路返回，取走的料都要落回输入槽
+            inputs.flush();
         }
         String tail = blockReason == null ? "" : "§7；" + blockReason;
         String msg = (done > 0
@@ -579,7 +619,15 @@ public final class TransporterMachine extends AbstractMachine {
     // 数据 / 搬运
     // ============================================================
 
+    /**
+     * 投料映射。第一次读走方块数据，之后走内存缓存，只在保存映射 / 重新放置时失效。
+     *
+     * <p>腐竹 2026-10-30「首先要减少查询次数」：以前每个周期都读 54 次方块数据再解析字符串。
+     */
     static Map<Integer, Map.Entry<ItemKey, Integer>> mappings(Location loc) {
+        if (loc == null) return Map.of();
+        Map<Integer, Map.Entry<ItemKey, Integer>> hit = MAP_CACHE.get(loc);
+        if (hit != null) return hit;
         Map<Integer, Map.Entry<ItemKey, Integer>> out = new LinkedHashMap<>();
         for (int slot = 0; slot < MAP_SLOTS; slot++) {
             String raw = MachineUtil.info(loc, MAP_PREFIX + slot);
@@ -593,68 +641,118 @@ public final class TransporterMachine extends AbstractMachine {
             } catch (Throwable ignored) {
             }
         }
-        return out;
+        Map<Integer, Map.Entry<ItemKey, Integer>> frozen = Map.copyOf(out);
+        if (MAP_CACHE.size() > 4096) MAP_CACHE.clear();   // 兜底：拆掉的机器不会自己清键
+        MAP_CACHE.put(loc, frozen);
+        return frozen;
     }
 
-    /** 从运输机自己的 0~44 输入槽里取；返回实际取到的数量 */
-    private static int takeFromInputs(BlockMenu menu, ItemKey k, int amt) {
-        if (menu == null || k == null) return 0;
-        int left = amt;
-        for (int slot = 0; slot < INPUT_SLOTS && left > 0; slot++) {
-            ItemStack it = itemIn(menu, slot);
-            if (it == null || it.getType().isAir()) continue;
-            ItemKey other = ItemKey.of(it);
-            if (other == null || !other.equals(k) || !ItemGuard.pristine(k, it)) continue;
-            int take = Math.min(left, it.getAmount());
-            int rest = it.getAmount() - take;
-            if (rest <= 0) menu.replaceExistingItem(slot, null);
-            else {
-                ItemStack copy = it.clone();
-                copy.setAmount(rest);
-                menu.replaceExistingItem(slot, copy);
+    /** 整块菜单快照；拿不到就给 54 个空位，调用方不必判空 */
+    private static ItemStack[] snapshot(BlockMenu menu) {
+        try {
+            if (menu != null) {
+                ItemStack[] snap = menu.getContents();
+                if (snap != null) return snap;
             }
-            left -= take;
+        } catch (Throwable ignored) {
         }
-        return amt - left;
+        return new ItemStack[54];
     }
 
-    /** 把没花掉的东西放回输入槽；塞不下掉在机器上 */
-    private static void addToInputs(BlockMenu menu, Location loc, ItemKey k, int amount) {
-        if (amount <= 0 || k == null) return;
-        ItemStack tpl = k.toTemplate();
-        if (tpl == null) return;
-        int max = Math.max(1, tpl.getMaxStackSize());
-        int left = amount;
-        if (menu != null) {
-            for (int slot = 0; slot < INPUT_SLOTS && left > 0; slot++) {
-                ItemStack it = itemIn(menu, slot);
+    /**
+     * 本机 0~44 输入槽的一轮视图：取料/回填都在本地副本上算，结束时只写回动过的格子。
+     *
+     * <p>腐竹 2026-10-30「首先要减少查询次数」：以前每取一种料都从 0 扫到 44，回填还要再扫两遍。
+     */
+    private static final class Inputs {
+        private final BlockMenu menu;
+        private final Location loc;
+        private final ItemStack[] items = new ItemStack[INPUT_SLOTS];
+        private final boolean[] dirty = new boolean[INPUT_SLOTS];
+
+        Inputs(BlockMenu menu, Location loc) {
+            this.menu = menu;
+            this.loc = loc;
+            ItemStack[] snap = snapshot(menu);
+            System.arraycopy(snap, 0, items, 0, Math.min(items.length, snap.length));
+        }
+
+        /** 取料；返回实际取到的数量 */
+        int take(ItemKey k, int amt) {
+            if (k == null || amt <= 0) return 0;
+            int left = amt;
+            for (int i = 0; i < items.length && left > 0; i++) {
+                ItemStack it = items[i];
                 if (it == null || it.getType().isAir()) continue;
                 ItemKey other = ItemKey.of(it);
-                if (other == null || !other.equals(k)) continue;
-                int add = Math.min(left, max - it.getAmount());
-                if (add <= 0) continue;
-                ItemStack copy = it.clone();
-                copy.setAmount(it.getAmount() + add);
-                menu.replaceExistingItem(slot, copy);
-                left -= add;
+                if (other == null || !other.equals(k) || !ItemGuard.pristine(k, it)) continue;
+                int take = Math.min(left, it.getAmount());
+                int rest = it.getAmount() - take;
+                if (rest <= 0) {
+                    items[i] = null;
+                } else {
+                    ItemStack copy = it.clone();
+                    copy.setAmount(rest);
+                    items[i] = copy;
+                }
+                dirty[i] = true;
+                left -= take;
             }
-            for (int slot = 0; slot < INPUT_SLOTS && left > 0; slot++) {
-                ItemStack it = itemIn(menu, slot);
-                if (it != null && !it.getType().isAir()) continue;
-                ItemStack copy = tpl.clone();
-                copy.setAmount(Math.min(left, max));
-                menu.replaceExistingItem(slot, copy);
-                left -= copy.getAmount();
+            return amt - left;
+        }
+
+        /** 把没花掉的东西塞回输入槽；塞不下掉在机器上 */
+        void put(ItemKey k, int amount) {
+            if (k == null || amount <= 0) return;
+            ItemStack tpl = k.toTemplate();
+            if (tpl == null) return;
+            int max = Math.max(1, tpl.getMaxStackSize());
+            int left = amount;
+            if (menu != null) {
+                for (int i = 0; i < items.length && left > 0; i++) {
+                    ItemStack it = items[i];
+                    if (it == null || it.getType().isAir()) continue;
+                    ItemKey other = ItemKey.of(it);
+                    if (other == null || !other.equals(k)) continue;
+                    int add = Math.min(left, max - it.getAmount());
+                    if (add <= 0) continue;
+                    ItemStack copy = it.clone();
+                    copy.setAmount(it.getAmount() + add);
+                    items[i] = copy;
+                    dirty[i] = true;
+                    left -= add;
+                }
+                for (int i = 0; i < items.length && left > 0; i++) {
+                    ItemStack it = items[i];
+                    if (it != null && !it.getType().isAir()) continue;
+                    ItemStack copy = tpl.clone();
+                    copy.setAmount(Math.min(left, max));
+                    items[i] = copy;
+                    dirty[i] = true;
+                    left -= copy.getAmount();
+                }
+            }
+            while (left > 0) {
+                ItemStack one = tpl.clone();
+                int n = Math.min(left, max);
+                one.setAmount(n);
+                left -= n;
+                try {
+                    loc.getWorld().dropItemNaturally(loc.clone().add(0.5, 1, 0.5), one);
+                } catch (Throwable ignored) {
+                }
             }
         }
-        while (left > 0) {
-            ItemStack one = tpl.clone();
-            int n = Math.min(left, max);
-            one.setAmount(n);
-            left -= n;
-            try {
-                loc.getWorld().dropItemNaturally(loc.clone().add(0.5, 1, 0.5), one);
-            } catch (Throwable ignored) {
+
+        /** 只写回真正动过的格子 */
+        void flush() {
+            if (menu == null) return;
+            for (int i = 0; i < items.length; i++) {
+                if (!dirty[i]) continue;
+                try {
+                    menu.replaceExistingItem(i, items[i]);
+                } catch (Throwable ignored) {
+                }
             }
         }
     }
@@ -681,7 +779,8 @@ public final class TransporterMachine extends AbstractMachine {
     private static int sizeOf(BlockMenu menu) {
         try {
             if (menu == null) return 0;
-            return menu.toInventory() == null ? 54 : menu.toInventory().getSize();
+            // 以前走 toInventory()（可能按需建 Bukkit 容器），ChestMenu 自己就有 getSize()
+            return menu.getSize();
         } catch (Throwable t) {
             return 54;
         }

@@ -42,6 +42,12 @@ public final class Config {
     public final boolean machineBootstrap;
     /** 原版物品优先用原版配方（腐竹 2026-10-29「尽量不使用粘液配方」），false = 旧行为（谁便宜用谁） */
     public final boolean vanillaFirst;
+    /**
+     * 原版物品不许用粘液配方定价（腐竹 2026-11-06：「原版物品不能使用粘液物品定价。
+     * 不然会变得超级低，然后因为有粘液配方也导致我没法快捷看到这个物品没有定价。」）
+     * 默认开；关掉就回到旧行为（粘液机器也能给原版物品报价）。
+     */
+    public final boolean vanillaOnlyVanillaRecipes;
     /** 同色变体统一价：max / min / avg / off */
     public final String paletteUnify;
 
@@ -219,6 +225,7 @@ public final class Config {
         this.anchorDerive = c.getBoolean("price.anchor-derive", true);
         this.machineBootstrap = c.getBoolean("price.machine-bootstrap", true);
         this.vanillaFirst = c.getBoolean("price.vanilla-first", true);
+        this.vanillaOnlyVanillaRecipes = c.getBoolean("price.vanilla-only-vanilla-recipes", true);
         this.paletteUnify = c.getString("price.palette-unify", "max");
 
         java.util.Set<String> black = new java.util.LinkedHashSet<>();
@@ -292,8 +299,10 @@ public final class Config {
         this.machineBuyMinBalance = Math.max(0.0, c.getDouble("machine.buy.min-balance", 0.0));
         this.machineGenJoulesPerEmc = Math.max(1L, c.getLong("machine.gen.joules-per-emc", 500L));
         this.machineGenCapacity = Math.max(1L, c.getLong("machine.gen.capacity", 2_000_000_000L));
-        this.machineSellInterval = Math.max(1, c.getInt("machine.sell.interval-ticks", 2));
-        this.machineBuyInterval = Math.max(1, c.getInt("machine.buy.interval-ticks", 2));
+        // 腐竹 2026-10-30：2 tick 时 64 台机器峰值 51ms，改成 3 tick ——
+        // 「最多改为 3 tick 就能察觉变慢了，那就改成 3 tick」（2 → 3 的均摊收益 1.5 倍，再多他就会觉得慢）
+        this.machineSellInterval = Math.max(1, c.getInt("machine.sell.interval-ticks", 3));
+        this.machineBuyInterval = Math.max(1, c.getInt("machine.buy.interval-ticks", 3));
 
         this.abilityFlightEmcPerSecond = Math.max(0.0, c.getDouble("ability.flight.emc-per-second", 500.0));
         this.abilityAuraEmcPerSecond = Math.max(0.0, c.getDouble("ability.aura.emc-per-second", 1000.0));
@@ -320,7 +329,8 @@ public final class Config {
         this.synthesisLogisticsEmcPerSlot = Math.max(0.0, c.getDouble("synthesis.logistics.emc-per-slot", 100.0));
         this.synthesisLogisticsInterval = Math.max(1, c.getInt("synthesis.logistics.interval-ticks", 2));
 
-        this.defaultSort = c.getString("gui.default-sort", "price-desc");
+        // 默认「历史买卖」（腐竹 2026-11-06：排序只留历史买卖 / 收藏；旧的 price-* 由 Sort.parse 兼容）
+        this.defaultSort = c.getString("gui.default-sort", "history");
         this.pageSize = Math.max(9, Math.min(45, c.getInt("gui.page-size", 45)));
         this.quickAmountMax = Math.max(2, c.getInt("gui.quick-amount-max", 128));
     }

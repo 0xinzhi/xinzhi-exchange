@@ -149,6 +149,26 @@ public final class PriceEngine {
     /** 原版配方先跑一趟定位出来的原版物品数（0.4.9） */
     public int vanillaFirstCount() { return vanillaFirstCount; }
     public void setVanillaFirst(boolean v) { this.vanillaFirst = v; }
+    /**
+     * 原版物品不许用粘液配方定价（腐竹 2026-11-06：
+     * 「原版物品不能使用粘液物品定价。不然会变得超级低，然后因为有粘液配方也导致我没法快捷看到这个物品没有定价」）。
+     *
+     * <p>开了以后：一条配方只有<b>机器是原版工作台 / 熔炉 / 切石机这类</b>（或没有机器）时，
+     * 才能给「原版 ItemKey」定价；粘液附属的机器配方只能给粘液物品定价。
+     * 结果就是「靠粘液机器才算出价的原版物品」回到<b>没有价</b>，
+     * 批量定价面板的「原版·无配方未定价」才看得见它们。
+     */
+    private boolean vanillaOnlyVanillaRecipes = true;
+    /** 因为上面这条被拦下报价的原版物品（去重） */
+    private final Set<ItemKey> vanillaBlocked = new HashSet<>();
+
+    public void setVanillaOnlyVanillaRecipes(boolean v) { this.vanillaOnlyVanillaRecipes = v; }
+
+    public boolean vanillaOnlyVanillaRecipes() { return vanillaOnlyVanillaRecipes; }
+
+    /** 因为「原版不许粘液定价」而没拿到价的原版物品数（0.4.17） */
+    public int vanillaBlockedCount() { return vanillaBlocked.size(); }
+
     /** 同色变体被统一成同一个价的物品数（0.4.9） */
     public int paletteCount() { return paletteCount; }
     public void setPaletteMode(String mode) { this.paletteMode = mode == null ? "off" : mode; }
@@ -265,6 +285,7 @@ public final class PriceEngine {
                                      Map<ItemKey, Double> dropDefaults,
                                      SellRules sellRules) {
         long start = System.nanoTime();
+        vanillaBlocked.clear();
         sellPrices.clear();
         lastSteps = 0;
         sellAdjusted = 0;
@@ -741,6 +762,12 @@ public final class PriceEngine {
 
     private void pushOffers(PriorityQueue<Offer> heap, Recipe r, Map<ItemKey, Double> pm) {
         if (r.getOutputs().isEmpty()) return;
+        // 原版物品只认原版配方（腐竹 2026-11-06）；机器为 null = 不挑机器，按原版口径放行
+        // 0.4.23：别的附属把原版配方原样搬到自家机器上（镜像配方）也算原版口径 ——
+        //         否则「原版工作台能合、配方却被镜像机器占着」的原版物品会被静默判死（钻石胸甲）。
+        //         判定只看「同输入同输出里有没有一条原版机器配方」，不点名任何附属（腐竹 2026-11-07）。
+        ItemKey machine = r.getMachine();
+        boolean vanillaSource = machine == null || machine.isVanilla() || r.isVanillaMirror();
         double total = 0;
         for (Map.Entry<ItemKey, Integer> e : r.getInputs().entrySet()) {
             Double p = pm.get(e.getKey());
@@ -750,8 +777,13 @@ public final class PriceEngine {
         }
         if (!(total > 0)) return;
         for (Map.Entry<ItemKey, Integer> out : r.getOutputs().entrySet()) {
+            ItemKey outKey = out.getKey();
+            if (vanillaOnlyVanillaRecipes && !vanillaSource && outKey.isVanilla()) {
+                if (!pm.containsKey(outKey)) vanillaBlocked.add(outKey);
+                continue;
+            }
             int qty = Math.max(1, out.getValue());
-            heap.offer(new Offer(total / qty, out.getKey(), r));
+            heap.offer(new Offer(total / qty, outKey, r));
         }
     }
 

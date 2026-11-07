@@ -18,17 +18,20 @@ public final class ItemGuard {
     private ItemGuard() {
     }
 
-    /** 这个堆叠是否仍是该 key 的标准模板（数量不参与比较）。 */
+    /**
+     * 这个堆叠是否仍是该 key 的标准模板（数量不参与比较）。
+     *
+     * <p>⚠ 2026-10-30 提速：原来每次都要 {@code stack.clone()} + {@code toTemplate()}
+     * （又 clone 一次模板）再 {@code setAmount(1)}，纯属重复分配 ——
+     * {@link ItemStack#isSimilar(ItemStack)} 本来就不比数量，所以这里直接用模板的只读引用
+     * {@link ItemKey#templateRef()} + 原堆叠比较，语义一模一样，但不再造两个临时对象。
+     */
     public static boolean pristine(ItemKey key, ItemStack stack) {
         if (key == null || stack == null || stack.getType().isAir()) return false;
-        ItemStack template = key.toTemplate();
+        ItemStack template = key.templateRef();
         if (template == null) return false;
         try {
-            ItemStack a = stack.clone();
-            a.setAmount(1);
-            ItemStack b = template;
-            b.setAmount(1);
-            return a.getType() == b.getType() && a.isSimilar(b);
+            return stack.getType() == template.getType() && stack.isSimilar(template);
         } catch (Throwable t) {
             // 某些自定义 ItemMeta 序列化会抛：宁可拒收，也不放一个可能被改过的物品进来
             return false;

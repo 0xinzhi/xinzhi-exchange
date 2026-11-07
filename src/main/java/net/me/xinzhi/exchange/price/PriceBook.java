@@ -13,7 +13,9 @@ import java.io.File;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -21,7 +23,8 @@ import java.util.Map;
  *
  * <h2>三层来源（优先级从低到高）</h2>
  * <ol>
- *   <li><b>内置兜底</b>：所有原版物品 = 1.0（技术方块除外）；</li>
+ *   <li><b>内置兜底</b>：<b>已删除</b>（腐竹 2026-11-07：「原版物品无价兜底为1功能删除」）——
+ *       原版物品不再默认 1.0，没写进定价表就是「无价」；</li>
  *   <li><b>jar 内种子数据</b> {@code prices-builtin.tsv}
  *       （= 主附属那张内置基础定价表，圆石 = 1 为价值单位）；</li>
  *   <li><b>服务器上的 {@code prices.yml}</b> —— 首次启动自动导出全表，
@@ -40,7 +43,8 @@ import java.util.Map;
  *     MY_ADDON_ITEM: 120
  * </pre>
  *
- * <p>没写的键回落到上两层；因此删掉一行不会"没有价"，只是回到内置值。
+ * <p>没写的键就是没有价（能靠配方推出的会自动拿到推导价，推不出来的会出现在
+ * 批量定价面板的「原版·未定价 / 粘液·未定价」里）。
  */
 public final class PriceBook {
 
@@ -101,10 +105,17 @@ public final class PriceBook {
         if (!file.isFile()) {
             writeSeed();
         }
-        YamlConfiguration yml = YamlConfiguration.loadConfiguration(file);
+        YamlConfiguration yml = new YamlConfiguration();
+        yml.options().parseComments(true);          // 清理旧兜底行时要重写文件，别把表头的说明弄丢
+        try {
+            yml.load(file);
+        } catch (Throwable t) {
+            plugin.getLogger().warning("[等价交换] 读 " + FILE_NAME + " 失败: " + t);
+        }
         int n = 0;
         n += mergeSection(yml.getConfigurationSection("vanilla"), true, "prices.yml");
         n += mergeSection(yml.getConfigurationSection("slimefun"), false, "prices.yml");
+        pruneLegacyVanillaFallback(yml);
         // 内置手工价：盖过 prices.yml 的 vanilla/slimefun 段，但下面的 manual 段仍能覆盖它
         for (Map.Entry<ItemKey, Double> e : builtinManual.entrySet()) {
             anchors.put(e.getKey(), e.getValue());
@@ -220,6 +231,76 @@ public final class PriceBook {
         return n;
     }
 
+    /**
+     * 删掉旧版 prices.yml 里那批「原版 = 1.0」自动填充行（腐竹 2026-11-07「原版物品无价兜底为1功能删除」）。
+     *
+     * <p>为什么要在读表时清：旧版 {@code writeSeed()} 把「所有原版材质 = 1.0」写进了 prices.yml，
+     * 之后以它为准 —— 只删代码里那个兜底，线上表里的 1.0 还会继续当锚点用，腐竹在表里
+     * 看到的仍然是「生兔肉 4、熟兔肉 1」。
+     *
+     * <p>判定（只动 top-level 的 {@code vanilla:}，不碰 {@code manual:}）：值恰好 1.0，
+     * 且不在内置手工价表里、内置基础表本身也不是 1.0 ⇒ 就是当年的自动填充。
+     * 圆石这类「本来就是 1」的（内置手工价表里有）一律保留。
+     *
+     * @return 删掉的条数
+     */
+    private int pruneLegacyVanillaFallback(YamlConfiguration yml) {
+        ConfigurationSection sec = yml.getConfigurationSection("vanilla");
+        if (sec == null) return 0;
+        List<String> drop = new ArrayList<>();
+        for (String name : sec.getKeys(false)) {
+            double v = sec.getDouble(name, Double.NaN);
+            if (Double.isNaN(v) || Math.abs(v - 1.0) > 1e-9) continue;
+            ItemKey k = vanillaKey(name);
+            if (k == null) continue;
+            if (builtinManual.containsKey(k)) continue;            // 手工价表里就是 1（圆石等）
+            Double b = builtin.get(k);
+            if (b != null && Math.abs(b - 1.0) < 1e-9) continue;   // 内置表本身就是 1
+            drop.add(name);
+        }
+        if (drop.isEmpty()) return 0;
+        for (String name : drop) {
+            ItemKey k = vanillaKey(name);
+            if (k != null) {
+                anchors.remove(k);
+                origin.remove(k);
+            }
+            sec.set(name, null);
+        }
+        try {
+            yml.save(file);
+        } catch (Throwable t) {
+            plugin.getLogger().warning("[等价交换] 清理旧版「原版 = 1.0」行失败（内存里已忽略）: " + t);
+        }
+        writeFallbackReport(drop);
+        plugin.getLogger().info("[等价交换] 已删除 " + FILE_NAME + " 里 " + drop.size()
+                + " 条旧版「原版 = 1.0」自动兜底价（名单: diag/removed-vanilla-fallback.tsv）");
+        return drop.size();
+    }
+
+    /** 把删掉的那批原版 1.0 记一份，方便反悔 / 逐个补真价 */
+    private void writeFallbackReport(List<String> names) {
+        try {
+            File dir = new File(plugin.getDataFolder(), "diag");
+            if (!dir.exists() && !dir.mkdirs()) return;
+            List<String> sorted = new ArrayList<>(names);
+            sorted.sort(String.CASE_INSENSITIVE_ORDER);
+            StringBuilder sb = new StringBuilder(4096);
+            sb.append("# 已删除的「原版 = 1.0」自动兜底价（腐竹 2026-11-07：删除无价兜底为 1 的功能）\n");
+            sb.append("# 这些材质现在交给配方推导；推不出来的就是无价，可在批量定价面板\n");
+            sb.append("# 「原版·未定价」里一次性筛出来补价。\n");
+            sb.append("# material\n");
+            for (String n : sorted) sb.append(n).append('\n');
+            File out = new File(dir, "removed-vanilla-fallback.tsv");
+            try (java.io.Writer w = new java.io.OutputStreamWriter(
+                    new java.io.FileOutputStream(out), StandardCharsets.UTF_8)) {
+                w.write(sb.toString());
+            }
+        } catch (Throwable ignored) {
+            // 名单只是给人看的，写不出来不影响定价
+        }
+    }
+
     private static ItemKey vanillaKey(String materialName) {
         Material mat = Material.matchMaterial(materialName);
         return mat == null ? null : ItemKey.vanilla(mat);
@@ -227,13 +308,9 @@ public final class PriceBook {
 
     private void loadBuiltin() {
         builtin.clear();
-        // 1) 原版兜底：全部物品 = 1.0（技术方块不算）
-        for (Material m : Material.values()) {
-            if (!m.isItem() || m.isAir()) continue;
-            if (isTechnical(m)) continue;
-            if (!hasItemForm(m)) continue;          // 见 ItemKey.templateRef 的同类坑
-            builtin.put(ItemKey.vanilla(m), 1.0);
-        }
+        // 1) 原版兜底（全部物品 = 1.0）已删除 —— 腐竹 2026-11-07「原版物品无价兜底为1功能删除」：
+        //    兜底让「没定过价」和「价正好是 1」分不开，也把批量定价里真正的缺口盖住了。
+        //    现在原版的价只来自内置表 / prices.yml / 手工价 / 配方推导。
         // 2) jar 内种子数据
         try (InputStream is = plugin.getResource(BUILTIN)) {
             if (is == null) {
@@ -282,16 +359,6 @@ public final class PriceBook {
         }
     }
 
-    /** 有些材质 isItem() 为真但 new ItemStack(m) 会抛（1.21.8 的墙上悬挂告示牌） */
-    private static boolean hasItemForm(Material m) {
-        try {
-            new org.bukkit.inventory.ItemStack(m);
-            return true;
-        } catch (Throwable t) {
-            return false;
-        }
-    }
-
     /** 技术方块（没有「物品」意义的原版方块）。VanillaRecipes 也按这个口径过滤，所以是 public。 */
     public static boolean isTechnical(Material m) {
         return switch (m) {
@@ -313,7 +380,7 @@ public final class PriceBook {
                 "",
                 "价值单位：圆石 = 1.0。",
                 "第一次启动时由 jar 内置表导出；之后以本文件为准。",
-                "没写的物品会回落到内置值（原版 = 1），所以删行不会让物品失去价格。",
+                "没写的物品就是没有价：能靠配方推出的会自动拿到推导价，推不出来的要手工定价",
                 "",
                 "其它附属的作者：把自家物品的 id 写进 slimefun: 段即可（不带 SF: 前缀）。",
                 "例：  slimefun:",

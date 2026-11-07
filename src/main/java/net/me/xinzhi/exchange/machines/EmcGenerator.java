@@ -24,8 +24,11 @@ import org.bukkit.event.block.BlockPlaceEvent;
 import org.bukkit.inventory.ItemStack;
 
 import javax.annotation.Nonnull;
+import java.util.HashMap;
 import java.util.Locale;
+import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * EMC 发电机：消耗 EMC 换电量，1 EMC = 500 J（腐竹 2026-10-19 定的比例）。
@@ -47,6 +50,23 @@ public final class EmcGenerator extends AbstractMachine implements EnergyNetProv
             OVERLOAD = 23;
     /** 过载持续时间：1 分钟（腐竹 2026-10-19） */
     private static final long OVERLOAD_MS = 60_000L;
+
+    /** 全局 tick 计数：用来给每台机器错开界面刷新节奏（不再把计数器写进方块数据） */
+    private static final AtomicLong TICKS = new AtomicLong();
+    /** 上周期画出去的内容：没变就不重建那 4 个带 lore 的物品 */
+    private final Map<Location, String> lastRender = new HashMap<>();
+
+    /**
+     * 这一 tick 该不该刷界面：每 2 tick 一次，并按坐标错开相位。
+     *
+     * <p>以前是「每台机器自己在 BlockStorage 里存 xz-cd 计数」，等于每 tick 都写一次方块数据；
+     * 现在计数只活在内存里，且各机器不同步，避免 64 台机器挤在同一 tick 重画。
+     */
+    private static boolean renderDue(Location loc) {
+        long t = TICKS.incrementAndGet();
+        int phase = (loc.getBlockX() * 31 + loc.getBlockZ() * 17 + loc.getBlockY()) & 1;
+        return ((t + phase) & 1) == 0;
+    }
 
     public EmcGenerator(ItemGroup group, SlimefunItemStack item,
                         RecipeType recipeType, ItemStack[] recipe) {
@@ -89,6 +109,7 @@ public final class EmcGenerator extends AbstractMachine implements EnergyNetProv
     @Override
     public void onMenuOpen(@Nonnull BlockMenu menu, @Nonnull Block b) {
         Location loc = b.getLocation();
+        lastRender.remove(loc);   // 打开界面强制按当前内容重画一次
         menu.addMenuClickHandler(OVERLOAD, (p, slot, item, action) -> {
             UUID owner = MachineUtil.ownerOrClaim(loc, p);
             if (owner == null || !owner.equals(p.getUniqueId())) {
@@ -167,12 +188,14 @@ public final class EmcGenerator extends AbstractMachine implements EnergyNetProv
                 return;
             }
 
-            long pool = MachineUtil.longInfo(loc, "xz-emc", 0);
-            pool += convertInputs(menu, loc);
+            // 记下改动前的值：下面只在「真的变了」时写回方块数据（空转机器不再每 tick 写 4 次）
+            long poolBefore = MachineUtil.longInfo(loc, "xz-emc", 0);
+            long pool = poolBefore + convertInputs(menu, loc);
 
             long ratio = Math.max(1, svc.config().machineGenJoulesPerEmc);
             long made = 0;
-            long joules = MachineUtil.longInfo(loc, "xz-j", 0);
+            long joulesBefore = MachineUtil.longInfo(loc, "xz-j", 0);
+            long joules = joulesBefore;
             if (pool > 0) {
                 made = (pool > Long.MAX_VALUE / ratio) ? Long.MAX_VALUE / 2 : pool * ratio;
                 joules = (joules > Long.MAX_VALUE - made) ? Long.MAX_VALUE : joules + made;
@@ -196,33 +219,40 @@ public final class EmcGenerator extends AbstractMachine implements EnergyNetProv
             if (mirrorTarget != mirrorNow) {
                 StorageCacheUtils.setData(loc, "energy-charge", String.valueOf(mirrorTarget));
             }
-            MachineUtil.set(loc, "xz-mirror", String.valueOf(mirrorTarget));
-            MachineUtil.set(loc, "xz-j", String.valueOf(joules));
-            MachineUtil.set(loc, "xz-emc", String.valueOf(pool));
+            if (mirrorTarget != lastMirror) MachineUtil.set(loc, "xz-mirror", String.valueOf(mirrorTarget));
+            if (joules != joulesBefore) MachineUtil.set(loc, "xz-j", String.valueOf(joules));
+            if (pool != poolBefore) MachineUtil.set(loc, "xz-emc", String.valueOf(pool));
 
             // 过载期间：电量池被抽干就提前结束（回到普通运作）
             if (over && joules <= 0 && mirrorTarget <= 0) {
                 MachineUtil.set(loc, "xz-ovl-until", "0");
             }
 
-            int cd = MachineUtil.intInfo(loc, "xz-cd", 0) + 1;
-            if (cd >= 2) {
-                cd = 0;
+            if (renderDue(loc)) {
                 render(menu, loc, over ? "§c过载输出中" : (made > 0 ? "§a发电中" : "§7待机"));
             }
-            MachineUtil.set(loc, "xz-cd", String.valueOf(cd));
         } catch (Throwable ignored) {
         }
     }
 
     private long convertInputs(BlockMenu menu, Location loc) {
         long emc = 0;
+        // 一次拿整块界面：18 次 getItemInSlot → 1 次 getContents（腐竹 2026-10-30：减少查询次数）
+        ItemStack[] snap;
+        try {
+            snap = menu.getContents();
+        } catch (Throwable t) {
+            return 0;
+        }
+        if (snap == null) return 0;
         for (int slot : INPUT) {
-            ItemStack it = menu.getItemInSlot(slot);
+            if (slot >= snap.length) break;
+            ItemStack it = snap[slot];
             if (it == null || it.getType().isAir()) continue;
             ItemKey k = ItemKey.of(it);
             if (k == null) continue;
-            if (!ItemGuard.pristine(k, it)) continue;
+            // 没有 ItemMeta 的原版物品必然原样，省一次模板深比较
+            if (it.hasItemMeta() && !ItemGuard.pristine(k, it)) continue;
             double unit = MachineUtil.sellUnit(loc, k);
             if (!(unit > 0)) continue;
             emc += (long) Math.floor(unit * it.getAmount());
@@ -242,6 +272,13 @@ public final class EmcGenerator extends AbstractMachine implements EnergyNetProv
         long joules = MachineUtil.longInfo(loc, "xz-j", 0);
         long mirror = getChargeLong(loc);
         long cap = getCapacityLong();
+        long until = MachineUtil.longInfo(loc, "xz-ovl-until", 0);
+        boolean over = until > System.currentTimeMillis();
+        long remainSec = over ? (until - System.currentTimeMillis()) / 1000 : -1;
+        // 内容没变就不重画：空转机器不再每 2 tick 重建 4 个带 lore 的物品
+        String key = status + "|" + pool + "|" + joules + "|" + mirror + "|" + cap + "|" + remainSec;
+        if (key.equals(lastRender.get(loc))) return;
+        lastRender.put(loc, key);
         try {
             menu.replaceExistingItem(STATUS, new CustomItemStack(Material.CLOCK, "§7状态", "§7" + status));
             menu.replaceExistingItem(POOL, new CustomItemStack(Material.EMERALD,
@@ -251,10 +288,9 @@ public final class EmcGenerator extends AbstractMachine implements EnergyNetProv
                     "§7对外供电 §f" + fmt(mirror) + " J",
                     "§7单次上限 " + fmt(cap) + " J",
                     joules > cap ? "§e超出部分留在机器里，按需补上" : "§7在容量内"));
-            long until = MachineUtil.longInfo(loc, "xz-ovl-until", 0);
-            if (until > System.currentTimeMillis()) {
+            if (over) {
                 menu.replaceExistingItem(OVERLOAD, new CustomItemStack(Material.TNT, "§c过载中",
-                        "§7剩余 §f" + ((until - System.currentTimeMillis()) / 1000) + " §7秒",
+                        "§7剩余 §f" + remainSec + " §7秒",
                         "§8结束后电量强制归零"));
             } else {
                 menu.replaceExistingItem(OVERLOAD, new CustomItemStack(Material.TNT, "§c过载输出",

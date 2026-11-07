@@ -89,6 +89,11 @@ price:
   # 原版物品优先用原版配方（工作台/熔炉/切石机…），算不出才用粘液机器的配方
   # 腐竹 2026-10-29：「原版物品配方优先使用原版配方。尽量不使用粘液配方」
   vanilla-first: true
+  # 原版物品「只许用原版配方定价」：开着时粘液机器的配方不能给原版物品报价
+  # 腐竹 2026-11-06：「原版物品不能使用粘液物品定价。不然会变得超级低，
+  #   然后因为有粘液配方也导致我没法快捷看到这个物品没有定价。」
+  # 关掉 = 旧行为（谁便宜用谁，粘液配方也能给原版物品定价）
+  vanilla-only-vanilla-recipes: true
   # 同色变体统一价（床 / 羊毛 / 旗帜 / 潜影盒 / 陶瓦 / 染料 …）：max=全族最高价、min、avg、off
   palette-unify: max
 
@@ -191,11 +196,13 @@ terminal:
 machine:
   sell:
     # 卖出机结算周期（tick）；20 tick = 1 秒
-    interval-ticks: 2
+    # 2026-10-30 腐竹：从 2 改成 3 —— 「最多改为 3 tick 就能察觉变慢了，那就改成 3 tick」
+    interval-ticks: 3
   buy:
     # 买入机周期（tick）：一个周期把 24 个模板全部买一遍（不再轮转）
     # 2026-10-26 腐竹：从 20 改成 2（20 tick 太慢，放上等价道具后像「迟迟不运行」）
-    interval-ticks: 2
+    # 2026-10-30 腐竹：2 → 3（64 台机器同时结算是 51ms 峰值的来源之一）
+    interval-ticks: 3
     # 余额低于它时买入机待机（机器面板上还能自己改，机器自己的值优先）
     min-balance: 0
   gen:
@@ -216,8 +223,11 @@ synthesis:
     interval-ticks: 2
 
 gui:
-  # 打开界面时的默认排序：price-desc / price-asc / name
-  default-sort: price-desc
+  # 打开界面时的默认排序（腐竹 2026-11-06 改成两种）：
+  #   history  = 历史买卖（最近成交的在前）
+  #   favorite = 收藏
+  # 旧值 price-desc / price-asc / name 还能读（自动当成 history），下次保存会写回新值
+  default-sort: history
   # 数量弹窗里滑条的快速选择上限（腐竹 2026-10-18 第七轮：128）。
   # 输入框仍然可以填任意精确值，滑条只负责"大概选"。
   quick-amount-max: 128

@@ -4,6 +4,7 @@ import io.github.thebusybiscuit.slimefun4.api.items.SlimefunItem;
 import net.me.xinzhi.exchange.core.ItemKey;
 import net.me.xinzhi.exchange.price.PriceEngine;
 import net.me.xinzhi.exchange.recipe.Recipe;
+import net.me.xinzhi.exchange.recipe.VanillaRecipeExtractor;
 import net.me.xinzhi.exchange.recipe.VanillaRecipes;
 import net.me.xinzhi.exchange.util.Text;
 import org.bukkit.Bukkit;
@@ -32,7 +33,7 @@ public final class ExchangeCommand implements CommandExecutor, TabCompleter {
     private static final List<String> SUBS = List.of(
             "help", "info", "price", "why", "roots", "top", "scan", "rebuild", "reload",
             "export", "set", "unset", "balance", "give", "admin", "menu", "emc", "limit", "craft",
-            "norecipe", "recalc", "anchor");
+            "norecipe", "recalc", "anchor", "terminal", "diagvanilla");
 
     private final JavaPlugin plugin;
     private final ExchangeService svc;
@@ -92,6 +93,10 @@ public final class ExchangeCommand implements CommandExecutor, TabCompleter {
                 if (!viewAll(s)) return true;
                 recalc(s, args);
             }
+            case "diagvanilla" -> {
+                if (!admin(s)) return true;
+                diagVanilla(s, args);
+            }
             case "norecipe" -> {
                 if (!viewAll(s)) return true;
                 noRecipe(s, args);
@@ -124,6 +129,7 @@ public final class ExchangeCommand implements CommandExecutor, TabCompleter {
             }
             case "balance" -> balance(s, args);
             case "give" -> give(s, args);
+            case "terminal" -> terminal(s, args);
             case "admin" -> adminItems(s);
             case "menu" -> menu(s, args);
             case "craft" -> {
@@ -306,6 +312,9 @@ public final class ExchangeCommand implements CommandExecutor, TabCompleter {
         return Double.parseDouble(v) * mul;
     }
 
+    /** 中文名 → 物品（腐竹 2026-11-07：直接敲「钻石胸甲」「橡木楼梯」要能认出来） */
+    private static volatile Map<String, ItemKey> NAME_INDEX;
+
     private static ItemKey parseItem(String raw) {
         if (raw == null || raw.isBlank()) return null;
         String t = raw.trim();
@@ -313,7 +322,39 @@ public final class ExchangeCommand implements CommandExecutor, TabCompleter {
         ItemKey sf = ItemKey.slimefun(t);
         if (sf != null && sf.toTemplate() != null) return sf;
         Material m = Material.matchMaterial(t);
-        return m == null ? null : ItemKey.vanilla(m);
+        if (m != null) return ItemKey.vanilla(m);
+        return byDisplayName(t);
+    }
+
+    private static ItemKey byDisplayName(String raw) {
+        Map<String, ItemKey> idx = NAME_INDEX;
+        if (idx == null) {
+            Map<String, ItemKey> built = new java.util.HashMap<>(2048);
+            for (Material m : Material.values()) {
+                if (m.isAir() || !m.isItem()) continue;
+                try {
+                    ItemKey k = ItemKey.vanilla(m);
+                    String n = k.getDisplayName();
+                    if (n == null || n.isBlank() || n.startsWith("VANILLA:")) continue;
+                    built.putIfAbsent(org.bukkit.ChatColor.stripColor(n), k);
+                } catch (Throwable ignored) {
+                }
+            }
+            idx = built;
+            NAME_INDEX = idx;
+        }
+        String want = org.bukkit.ChatColor.stripColor(raw).trim();
+        ItemKey hit = idx.get(want);
+        if (hit != null) return hit;
+        // 粘液物品名（池子里有多少算多少，查不到就退回 null）
+        for (ItemKey k : ItemKey.pooledKeys()) {
+            if (!k.isSlimefun()) continue;
+            try {
+                if (want.equals(org.bukkit.ChatColor.stripColor(k.getDisplayName()))) return k;
+            } catch (Throwable ignored) {
+            }
+        }
+        return null;
     }
 
     private void help(CommandSender s) {
@@ -365,6 +406,10 @@ public final class ExchangeCommand implements CommandExecutor, TabCompleter {
                 ? "两阶段 §7（本体/原版先定 §e" + e.stage1Count()
                   + " §7→ 附属补 §e" + e.stage2Count() + "§7）"
                 : "单阶段（所有配方一起算）"));
+        s.sendMessage(e.vanillaOnlyVanillaRecipes()
+                ? "§7原版定价: §f只用原版配方 §7（粘液机器不许给原版物品报价；已拦下 §e"
+                  + e.vanillaBlockedCount() + " §7个原版物品的粘液报价）"
+                : "§e原版定价: 粘液配方也能给原版物品报价 §7（price.vanilla-only-vanilla-recipes: false）");
         s.sendMessage("§7机器依赖: §f" + (svc.config().requireMachine
                 ? "开 §7（机器本身没算出价的配方不参与定价，跳过 §e"
                   + e.machineBlockedRecipes() + " §7条）"
@@ -457,6 +502,81 @@ public final class ExchangeCommand implements CommandExecutor, TabCompleter {
                         + " → " + (Double.isNaN(cost) ? "算不出" : Text.num(cost / Math.max(1, r.getOutputs().getOrDefault(key, 1)))));
             }
         }
+    }
+
+    /**
+     * 诊断：某个原版物品的配方到底卡在哪一段（腐竹 2026-11-07「钻石胸甲没价」）。
+     * 用法：{@code /xzex diagvanilla [物品]}，不给物品就看钻石胸甲。
+     */
+    private void diagVanilla(CommandSender s, String[] args) {
+        ItemKey key = null;
+        if (args.length >= 2) {
+            key = parseItem(args[1]);
+            if (key == null) {
+                s.sendMessage("§c[等价交换] 认不出物品 §f" + args[1]
+                        + " §7——可以给中文名 / 英文材质名 / SF:ID，或拿着物品直接输 /xzex diagvanilla（不带参数默认钻石胸甲）");
+                return;
+            }
+        } else if (s instanceof Player p) {
+            key = keyInHandOrCursor(p);
+        }
+        if (key == null) key = ItemKey.vanilla(Material.DIAMOND_CHESTPLATE);
+        s.sendMessage("§6===== 原版配方诊断: " + key.getDisplayName() + " §8(" + key + ")§6 =====");
+
+        // ① 提取器缓存里有没有它（先重扫：别的附属可能在我们之后才注册配方）
+        int addedNow = 0;
+        try { addedNow = VanillaRecipeExtractor.refresh(svc.registry()); } catch (Throwable ignored) {}
+        java.util.List<Recipe> cache = VanillaRecipeExtractor.collected();
+        s.sendMessage("§7刚才重扫: §f" + (addedNow > 0 ? "补进 " + addedNow + " 条新配方" : "没有新配方"));
+        int inCache = 0;
+        for (Recipe r : cache) if (r.getOutputs().containsKey(key)) inCache++;
+        s.sendMessage("§7提取器缓存: §f" + cache.size() + " §7条配方，其中产出它 §f" + inCache + " §7条");
+
+        // ② 实时 recipeIterator（现在这一刻还能不能读到）
+        int live = 0;
+        java.util.Set<String> liveClasses = new java.util.LinkedHashSet<>();
+        Material mat = key.getMaterial();
+        try {
+            java.util.Iterator<org.bukkit.inventory.Recipe> it = org.bukkit.Bukkit.recipeIterator();
+            while (it.hasNext()) {
+                org.bukkit.inventory.Recipe rc = it.next();
+                ItemStack out = null;
+                if (rc instanceof org.bukkit.inventory.CraftingRecipe cr) out = cr.getResult();
+                else if (rc instanceof org.bukkit.inventory.FurnaceRecipe fr) out = fr.getResult();
+                else if (rc instanceof org.bukkit.inventory.StonecuttingRecipe sr2) out = sr2.getResult();
+                if (out == null || mat == null || out.getType() != mat) continue;
+                live++;
+                String cls = rc.getClass().getSimpleName();
+                liveClasses.add(cls);
+                String keyName = "";
+                try {
+                    if (rc instanceof org.bukkit.Keyed kd) keyName = " §8[" + kd.getKey() + "]";
+                } catch (Throwable ignored) {}
+                s.sendMessage("§8  · " + cls + keyName + " → " + VanillaRecipeExtractor.describe(rc));
+            }
+        } catch (Throwable t) {
+            s.sendMessage("§crecipeIterator 读失败: " + t);
+        }
+        s.sendMessage("§7实时 recipeIterator 里产出它的配方: §f" + live
+                + (liveClasses.isEmpty() ? "" : " §8(" + String.join(",", liveClasses) + ")"));
+
+        // ③ 配方库里有什么
+        java.util.List<Recipe> ps = svc.registry().producersOf(key);
+        s.sendMessage("§7配方库里的生产者: §f" + ps.size() + " §7条" + (ps.isEmpty() ? "" : "："));
+        int shown = 0;
+        for (Recipe r : ps) {
+            if (shown++ >= 6) { s.sendMessage("§8  …"); break; }
+            ItemKey m = r.getMachine();
+            boolean ready = svc.isFreeMachine(m) || svc.engine().hasPrice(m);
+            s.sendMessage("§8  · " + m.getDisplayName() + " §8(" + m + ") "
+                    + (ready ? "§a机器有价" : "§c机器没价")
+                    + (r.isVanillaMirror() ? " §b[原版镜像]" : ""));
+        }
+        s.sendMessage("§7原版工作台机器上的配方: §f"
+                + svc.registry().ofMachine(ItemKey.vanilla(Material.CRAFTING_TABLE)).size()
+                + " §7条 · 识别成原版镜像的配方: §f" + svc.registry().vanillaMirrorCount() + " §7条");
+        s.sendMessage("§7被「原版只认原版配方」拦下的原版物品: §f" + svc.engine().vanillaBlockedCount() + " §7个");
+        s.sendMessage("§7结论: " + (svc.engine().hasPrice(key) ? "§a现在有价" : "§c现在没价"));
     }
 
     /** 追一条「为什么没价」的链条（最多 3 层，避免刷屏） */
@@ -900,6 +1020,36 @@ public final class ExchangeCommand implements CommandExecutor, TabCompleter {
                 + Text.num(svc.manager().balance(target.getUniqueId())));
     }
 
+    /**
+     * /xzex terminal [玩家] —— 发一台「显示上限无穷」的等价终端（腐竹 2026-11-06）。
+     *
+     * <p>为什么需要：批量定价时想一眼看到「哪些原版物品根本没价」，
+     * 但界面只显示上限以下的物品；上限无穷就都能看见。
+     */
+    private void terminal(CommandSender s, String[] args) {
+        if (!admin(s)) return;
+        Player target;
+        if (args.length >= 2) {
+            target = Bukkit.getPlayerExact(args[1]);
+            if (target == null) { s.sendMessage("§c[等价交换] 玩家不在线"); return; }
+        } else if (s instanceof Player p) {
+            target = p;
+        } else {
+            s.sendMessage("§c用法: /xzex terminal <玩家>");
+            return;
+        }
+        SlimefunItem sf = SlimefunItem.getById(TerminalItem.ID);
+        if (!(sf instanceof TerminalItem t)) {
+            s.sendMessage("§c[等价交换] 等价终端没注册（插件还没加载完？）");
+            return;
+        }
+        ItemStack it = t.unlimited();
+        Map<Integer, ItemStack> left = target.getInventory().addItem(it);
+        left.values().forEach(x -> target.getWorld().dropItem(target.getLocation(), x));
+        s.sendMessage("§a[等价交换] 已给 " + target.getName() + " 一台显示上限无穷的等价终端"
+                + (left.isEmpty() ? "" : " §7（背包满了，多的掉在脚下）"));
+    }
+
     // ============================================================
     // 原版·无配方清单
     // ============================================================
@@ -908,9 +1058,9 @@ public final class ExchangeCommand implements CommandExecutor, TabCompleter {
      * 列出「原版物品里没有任何配方能产出」的那些（腐竹 2026-10-29 原话：
      * 「能列出原版物品中没有合成配方的物品让我自行定价吗？或者制作一个扫描道具让我在游戏中定价也行」）。
      *
-     * <p>为什么是「无配方」这一批：价表给所有原版材质都垫了 1.0 兜底，配方又只收粘液的，
-     * 所以原版物品的价实际上全是手工/内置表拍进去的。真正<b>非拍不可</b>的，就是这批
-     * 连原版配方都没有的物品 —— 它们撑起整张原版价图，改一个会顺价传下去。
+     * <p>为什么是「无配方」这一批：原版价图里真正<b>非拍不可</b>的，就是这批连原版配方都没有的
+     * 物品 —— 它们撑起整张原版价图，改一个会顺价传下去。
+     * （2026-11-07 起「所有原版物品 = 1.0」的兜底已删除，没价的物品会直接显示为无价。）
      *
      * <p>用法：
      * <ul>
@@ -1130,17 +1280,17 @@ public final class ExchangeCommand implements CommandExecutor, TabCompleter {
             if (k == null) continue;
             double v = svc.engine().priceOf(k);
             String origin = svc.book().originOf(k);
-            boolean fallback = "builtin".equals(origin) && Math.abs(v - 1.0) < 1e-9;
-            if (fallback) flat++;
+            boolean noPrice = !svc.engine().hasPrice(k);   // 2026-11-07 起不再有「兜底 1.0」
+            if (noPrice) flat++;
             if (shown >= limit) continue;
             shown++;
             s.sendMessage("§7" + shown + ". §f" + k.getDisplayName() + " §8(" + m.name() + ") §7价 §e"
-                    + Text.num(v) + (fallback ? " §8兜底 1.0" : " §8" + origin));
+                    + Text.num(v) + (noPrice ? " §8无价" : " §8" + origin));
         }
         if (size > shown) {
             s.sendMessage("§8… 还有 " + (size - shown) + " 个没显示（§7/xzex norecipe " + size + "§8 看全部）");
         }
-        s.sendMessage("§7其中 §e" + flat + " §7个还在内置兜底价 §e1.0 §7（等于没定过价）");
+        s.sendMessage("§7其中 §e" + flat + " §7个还没有价（§8配方推不出、表里也没写§7）");
         s.sendMessage("§a完整清单已导出 → §f" + writeNoRecipe(all));
         s.sendMessage("§8游戏内直接定价: §f/xzex norecipe add");
     }
@@ -1186,7 +1336,7 @@ public final class ExchangeCommand implements CommandExecutor, TabCompleter {
     }
 
     private ExchangeGui.Sort sortDefault() {
-        return ExchangeGui.Sort.parse(svc.config().defaultSort, ExchangeGui.Sort.PRICE_DESC);
+        return ExchangeGui.Sort.parse(svc.config().defaultSort, ExchangeGui.Sort.HISTORY);
     }
 
     /** 解析物品：SF:id / VANILLA:MAT / 材质名 / 粘液 id / 名称包含 */

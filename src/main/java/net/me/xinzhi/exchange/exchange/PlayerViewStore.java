@@ -10,7 +10,9 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
+import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -41,10 +43,21 @@ public final class PlayerViewStore {
     /** 每个玩家的清单最多记多少条 */
     public static final int MAX_PER_KIND = 800;
 
+    /** 搜索历史最多留几个（腐竹 2026-11-06：「可以保留5个」） */
+    public static final int MAX_SEARCH = 5;
+
     private static final class Entry {
         final LinkedHashSet<ItemKey> sold = new LinkedHashSet<>();
         /** 收藏（腐竹 2026-10-28）：从自己卖过的清单里挑一部分常驻，排序「收藏」只看这些 */
         final LinkedHashSet<ItemKey> fav = new LinkedHashSet<>();
+        /** 交易历史（腐竹 2026-11-06）：最近一次成交（买或卖）的时间，排序「历史买卖」按它倒序 */
+        final LinkedHashMap<ItemKey, Long> hist = new LinkedHashMap<>();
+        /** 隐藏的物品（腐竹 2026-11-06）：正常清单不显示，搜索仍然显示 */
+        final LinkedHashSet<ItemKey> hidden = new LinkedHashSet<>();
+        /** 「隐藏物品」开关：开着时点清单里的物品 = 加入 / 移出隐藏 */
+        boolean hideMode;
+        /** 最近的搜索词（最新的在前，最多 {@link #MAX_SEARCH} 个，同样不重复） */
+        final LinkedList<String> searches = new LinkedList<>();
         /** 玩家主动关掉了超级菜单（默认开）。存 false 才写盘，见 save() */
         boolean modOff;
     }
@@ -73,6 +86,49 @@ public final class PlayerViewStore {
         if (entry(id).sold.add(key)) touch();
     }
 
+    /** 记一笔成交（买或卖都算，腐竹 2026-11-06：排序「历史买卖」用它） */
+    public synchronized void markTrade(UUID id, ItemKey key) {
+        if (id == null || key == null) return;
+        Entry e = entry(id);
+        e.hist.remove(key);                  // 重新放到末尾 = 最近一次
+        e.hist.put(key, System.currentTimeMillis());
+        while (e.hist.size() > MAX_PER_KIND) {
+            var it = e.hist.keySet().iterator();
+            if (!it.hasNext()) break;
+            it.next();
+            it.remove();
+        }
+        touch();
+    }
+
+    /** 交易历史：最近成交的在前（界面的「历史买卖」排序） */
+    public synchronized List<ItemKey> historyOrder(UUID id) {
+        Entry e = data.get(id);
+        if (e == null || e.hist.isEmpty()) return List.of();
+        List<ItemKey> out = new ArrayList<>(e.hist.size());
+        java.util.Iterator<ItemKey> it = e.hist.keySet().iterator();
+        while (it.hasNext()) out.add(it.next());
+        java.util.Collections.reverse(out);   // LinkedHashMap 是「最早 → 最近」，反过来才是最近的在前
+        return out;
+    }
+
+    /** 今天（服务器本地时区）成交过的物品，最近的在前（腐竹 2026-11-06：「历史排序只显示今天操作过的」） */
+    public synchronized List<ItemKey> historyToday(UUID id) {
+        Entry e = data.get(id);
+        if (e == null || e.hist.isEmpty()) return List.of();
+        long since = java.time.LocalDate.now().atStartOfDay(java.time.ZoneId.systemDefault())
+                .toInstant().toEpochMilli();
+        List<ItemKey> out = new ArrayList<>();
+        java.util.Iterator<Map.Entry<ItemKey, Long>> it = e.hist.entrySet().iterator();
+        while (it.hasNext()) {
+            Map.Entry<ItemKey, Long> h = it.next();
+            Long ts = h.getValue();
+            if (ts != null && ts >= since) out.add(h.getKey());
+        }
+        java.util.Collections.reverse(out);   // LinkedHashMap 是「最早 → 最近」
+        return out;
+    }
+
     public synchronized boolean sold(UUID id, ItemKey key) {
         Entry e = data.get(id);
         return e != null && e.sold.contains(key);
@@ -83,6 +139,74 @@ public final class PlayerViewStore {
         Entry e = data.get(id);
         if (e == null) return List.of();
         return new ArrayList<>(e.sold);
+    }
+
+    // ============================================================
+    // 隐藏物品（腐竹 2026-11-06）
+    // ============================================================
+
+    /** 是否在隐藏里 */
+    public synchronized boolean hidden(UUID id, ItemKey key) {
+        Entry e = data.get(id);
+        return e != null && key != null && e.hidden.contains(key);
+    }
+
+    /** 隐藏的整份清单（只读副本） */
+    public synchronized List<ItemKey> hiddenKeys(UUID id) {
+        Entry e = data.get(id);
+        if (e == null) return List.of();
+        return new ArrayList<>(e.hidden);
+    }
+
+    /** 切换隐藏，返回切换后的状态：true = 现在已隐藏 */
+    public synchronized boolean toggleHidden(UUID id, ItemKey key) {
+        if (id == null || key == null) return false;
+        Entry e = entry(id);
+        boolean on;
+        if (e.hidden.remove(key)) {
+            on = false;
+        } else {
+            e.hidden.add(key);
+            on = true;
+        }
+        save();
+        return on;
+    }
+
+    /** 「隐藏物品」开关；开着时点物品 = 隐藏 / 取消隐藏 */
+    public synchronized boolean hideMode(UUID id) {
+        Entry e = data.get(id);
+        return e != null && e.hideMode;
+    }
+
+    public synchronized void setHideMode(UUID id, boolean on) {
+        if (id == null) return;
+        Entry e = entry(id);
+        if (e.hideMode == on) return;
+        e.hideMode = on;
+        save();
+    }
+
+    // ============================================================
+    // 搜索历史（腐竹 2026-11-06：「搜索增加历史搜索选项。可以保留5个」）
+    // ============================================================
+
+    /** 最近的搜索词，最新的在前，最多 {@link #MAX_SEARCH} 个，同样不重复 */
+    public synchronized List<String> searchHistory(UUID id) {
+        Entry e = data.get(id);
+        if (e == null) return List.of();
+        return new ArrayList<>(e.searches);
+    }
+
+    public synchronized void addSearch(UUID id, String keyword) {
+        if (id == null || keyword == null) return;
+        String k = keyword.trim().toLowerCase(java.util.Locale.ROOT);
+        if (k.isEmpty()) return;
+        Entry e = entry(id);
+        e.searches.removeIf(s -> s.equalsIgnoreCase(k));
+        e.searches.addFirst(k);
+        while (e.searches.size() > MAX_SEARCH) e.searches.removeLast();
+        touch();
     }
 
     // ============================================================
@@ -185,6 +309,20 @@ public final class PlayerViewStore {
                 for (ItemKey k : e.fav) l.add(k.toString());
                 yml.set(base + ".fav", l);
             }
+            if (!e.hist.isEmpty()) {
+                List<String> l = new ArrayList<>(e.hist.size());
+                for (Map.Entry<ItemKey, Long> h : e.hist.entrySet()) {
+                    l.add(h.getKey() + "|" + h.getValue());
+                }
+                yml.set(base + ".hist", l);
+            }
+            if (!e.hidden.isEmpty()) {
+                List<String> l = new ArrayList<>(e.hidden.size());
+                for (ItemKey k : e.hidden) l.add(k.toString());
+                yml.set(base + ".hidden", l);
+            }
+            if (e.hideMode) yml.set(base + ".hide-mode", true);
+            if (!e.searches.isEmpty()) yml.set(base + ".searches", new ArrayList<>(e.searches));
             if (e.modOff) yml.set(base + ".super-menu", false);
         }
         try {
@@ -213,12 +351,37 @@ public final class PlayerViewStore {
                 readInto(root.getStringList(key + ".preview"), e.sold);
                 migrated += e.sold.size() - before;
                 readInto(root.getStringList(key + ".fav"), e.fav);
+                readHist(root.getStringList(key + ".hist"), e.hist);
+                readInto(root.getStringList(key + ".hidden"), e.hidden);
+                e.hideMode = root.getBoolean(key + ".hide-mode", false);
+                for (String s : root.getStringList(key + ".searches")) {
+                    if (s == null || s.isBlank()) continue;
+                    if (e.searches.size() >= MAX_SEARCH) break;
+                    e.searches.add(s);
+                }
                 e.modOff = !root.getBoolean(key + ".super-menu", true);
             }
             plugin.getLogger().info("[等价交换] 玩家清单已加载: " + data.size() + " 个玩家"
                     + (migrated > 0 ? "（老 .preview 记录并入卖过清单 " + migrated + " 条）" : ""));
         } catch (Throwable t) {
             plugin.getLogger().warning("[等价交换] 读 players.yml 失败: " + t);
+        }
+    }
+
+    /** 交易历史：每行 {@code key|毫秒时间戳}；老数据没有时间戳就当 0（排序时垫底） */
+    private static void readHist(List<String> raw, Map<ItemKey, Long> sink) {
+        if (raw == null) return;
+        for (String s : raw) {
+            if (s == null || s.isBlank()) continue;
+            int cut = s.lastIndexOf('|');
+            long ts = 0L;
+            String keyPart = s;
+            if (cut > 0) {
+                keyPart = s.substring(0, cut);
+                try { ts = Long.parseLong(s.substring(cut + 1)); } catch (Throwable ignored) {}
+            }
+            ItemKey k = ItemKey.fromStored(keyPart);
+            if (k != null) sink.put(k, ts);
         }
     }
 

@@ -23,6 +23,7 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.UUID;
 
 /**
  * 兑换界面（主清单 + 物品详情 / 材料链）。
@@ -62,9 +63,11 @@ public final class ExchangeGui {
     public static final int NAV_SORT = 3;
     public static final int NAV_BALANCE = 4;
     public static final int NAV_REFRESH = 5;
-    public static final int NAV_NEXT = 6;
+    /** 隐藏物品开关（腐竹 2026-11-06：原「下一页」的位置，54 格里 = 51 槽） */
+    public static final int NAV_HIDE = 6;
     public static final int NAV_MODE = 7;
-    public static final int NAV_CLOSE = 8;
+    /** 下一页（腐竹 2026-11-06：挪到最后一格，54 格里 = 53 槽） */
+    public static final int NAV_NEXT = 8;
 
     /** 详情界面的固定格（仍按 54 格） */
     public static final int SLOT_DETAIL_TARGET = 4;
@@ -84,9 +87,18 @@ public final class ExchangeGui {
         public Mode other() { return this == MINE ? SEARCH : MINE; }
     }
 
-    /** 腐竹 2026-10-28：排序只要三种 —— 低→高 / 高→低 / 收藏（收藏模式只列收藏过的） */
+    /**
+     * 排序（腐竹 2026-11-06：从三种改成两种 —— 历史买卖 / 收藏）。
+     *
+     * <p>{@link #HISTORY} 按最近一次成交（买或卖都算）倒序，没成交过的按名字垫底；
+     * {@link #FAVORITE} 只列收藏过的（腐竹 2026-10-28：「在收藏中购买可以省一步搜索」）。
+     *
+     * <p>老版本的 {@code price-asc / price-desc} 配置值仍然认 —— 一律落到历史买卖，
+     * 所以服务器里现有的 config.yml 不用改。
+     */
     public enum Sort {
-        PRICE_ASC("价格 低→高"), PRICE_DESC("价格 高→低"), FAVORITE("收藏");
+        /** 正常：顺序不动，只有新加入的排到最前（腐竹 2026-11-06） */
+        NORMAL("正常"), HISTORY("历史买卖"), FAVORITE("收藏");
 
         public final String label;
         Sort(String label) { this.label = label; }
@@ -95,7 +107,14 @@ public final class ExchangeGui {
 
         public static Sort parse(String s, Sort fallback) {
             if (s == null) return fallback;
-            for (Sort v : values()) if (v.name().equalsIgnoreCase(s)) return v;
+            String v = s.trim().toLowerCase(Locale.ROOT);
+            if (v.equals("favorite") || v.equals("fav") || v.equals("收藏")) return FAVORITE;
+            if (v.equals("normal") || v.equals("norm") || v.equals("正常")) return NORMAL;
+            if (v.equals("history") || v.equals("hist") || v.equals("历史买卖")
+                    || v.equals("price-asc") || v.equals("price-desc") || v.equals("price")) {
+                return HISTORY;
+            }
+            for (Sort x : values()) if (x.name().equalsIgnoreCase(v)) return x;
             return fallback;
         }
     }
@@ -204,6 +223,7 @@ public final class ExchangeGui {
 
     /** 带显示上限地打开（等价终端分阶：普通命令/管理员走 {@link TradeCap#UNLIMITED}） */
     public void open(Player p, int page, Sort sort, String keyword, Mode mode, long cap) {
+        if (p != null) REOPEN.put(p.getUniqueId(), System.currentTimeMillis());
         Mode md = mode == null ? Mode.MINE : mode;
         String kw = normalize(keyword);
         // 普通玩家没有「全库搜索」，但可以搜自己的清单（腐竹 2026-10-18 本轮）
@@ -308,6 +328,15 @@ public final class ExchangeGui {
 
     /** 点物品格：左键换出 1 / Shift+左键数量 / 右键卖光标 / Shift+右键材料链。 */
     public void itemClicked(Player p, MenuState st, ItemKey key, int button, boolean shift) {
+        // 「隐藏物品」开关开着时：点物品 = 加进 / 移出隐藏（腐竹 2026-11-06）
+        if (store.hideMode(p.getUniqueId())) {
+            boolean nowHidden = store.toggleHidden(p.getUniqueId(), key);
+            p.sendMessage(nowHidden
+                    ? "§7已隐藏 §f" + key.getDisplayName() + " §8（正常清单不再显示，搜索仍然能搜到）"
+                    : "§a已取消隐藏 §f" + key.getDisplayName());
+            reopen(p, st);
+            return;
+        }
         // ★ 光标上有可识别物品 = 先卖它（原版界面在 listener 里做同一件事；mod 界面没有
         //   InventoryClickEvent，所以这里补一次，否则拿在手上的物品点商品格会变成"买"）
         ItemStack cursor = p.getItemOnCursor();
@@ -447,7 +476,26 @@ public final class ExchangeGui {
         switch (index) {
             case NAV_PREV -> open(p, st.page - 1, st.sort, st.keyword, st.mode, st.cap);
             case NAV_NEXT -> open(p, st.page + 1, st.sort, st.keyword, st.mode, st.cap);
-            case NAV_SORT -> open(p, st.page, st.sort.next(), st.keyword, st.mode, st.cap);
+            case NAV_SORT -> {
+                // 腐竹 2026-11-06：主手拿着等价道具点排序 = 把排序写进道具 PDC，
+                // 下次用这台终端打开时优先用它（其它终端 / 手里的别的道具不受影响）
+                Sort next = st.sort.next();
+                ItemStack held = p.getInventory().getItemInMainHand();
+                if (!TerminalItem.isTerminal(held)) held = p.getInventory().getItemInOffHand();
+                if (TerminalItem.isTerminal(held) && TerminalItem.setSortMode(held, next)) {
+                    p.sendMessage("§a[等价交换] 排序设为 §f" + next.label
+                            + " §7（已记在这台终端上，下次打开优先用它）");
+                }
+                open(p, st.page, next, st.keyword, st.mode, st.cap);
+            }
+            case NAV_HIDE -> {
+                boolean on = !store.hideMode(p.getUniqueId());
+                store.setHideMode(p.getUniqueId(), on);
+                p.sendMessage(on
+                        ? "§a[等价交换] 隐藏模式 §f开 §7：点清单里的物品 = 加入 / 移出隐藏"
+                        : "§7[等价交换] 隐藏模式 §f关 §7：已隐藏的物品不再出现在正常清单里");
+                open(p, st.page, st.sort, st.keyword, st.mode, st.cap);
+            }
             case NAV_BALANCE -> { /* 信息格 */ }
             case NAV_REFRESH -> {
                 // 腐竹 2026-10-28：刷新价表改成管理员功能 + 全服 2 小时冷却
@@ -471,7 +519,6 @@ public final class ExchangeGui {
                 p.sendMessage("§a[等价交换] 价表已重建");
                 open(p, st.page, st.sort, st.keyword, st.mode, st.cap);
             }
-            case NAV_CLOSE -> close(p);
             case NAV_PAGE -> {
                 int pages = pages(p, st.sort, st.keyword, st.mode, st.grid, st.cap);
                 if (pages <= 1) {
@@ -492,14 +539,17 @@ public final class ExchangeGui {
 
     private void openSearch(Player p, MenuState st) {
         boolean all = canViewAll(p);
+        // 腐竹 2026-11-06：搜索框下面给最近 5 个搜索词，各一个按键
+        java.util.List<String> history = store.searchHistory(p.getUniqueId());
         Dialogs.text(plugin, p,
                 all ? "§8✦ 搜索全部物品 ✦" : "§8✦ 搜索我的物品 ✦",
                 all ? "§7输入关键词（匹配名称或 id；留空 = 清除）"
                     : "§7只在你卖过的清单里找（留空 = 清除）",
-                st.keyword == null ? "" : st.keyword, 48,
+                st.keyword == null ? "" : st.keyword, 48, history,
                 () -> reopen(p, st),
                 kw -> {
                     String k = normalize(kw);
+                    if (k != null) store.addSearch(p.getUniqueId(), k);
                     open(p, 0, st.sort, k, k == null ? Mode.MINE : Mode.SEARCH, st.cap);
                 });
     }
@@ -523,7 +573,21 @@ public final class ExchangeGui {
     }
 
     public void reopen(Player p, MenuState st) {
+        if (p != null) REOPEN.put(p.getUniqueId(), System.currentTimeMillis());
         open(p, st.page, st.sort, st.keyword, st.mode, st.cap);
+    }
+
+    /** 程序内部重新打开界面的时间戳（Bukkit 会在 openInventory 时顺手发一次 InventoryCloseEvent） */
+    private static final java.util.Map<UUID, Long> REOPEN = new java.util.concurrent.ConcurrentHashMap<>();
+
+    static boolean internalOpen(UUID id) {
+        Long t = REOPEN.get(id);
+        if (t == null) return false;
+        if (System.currentTimeMillis() - t > 1000L) {
+            REOPEN.remove(id);
+            return false;
+        }
+        return true;
     }
 
     // ============================================================
@@ -570,6 +634,14 @@ public final class ExchangeGui {
         if (cap != TradeCap.UNLIMITED) {
             list.removeIf(k -> TradeCap.blocks(cap, manager.engine().priceOf(k)));
         }
+        // 隐藏物品：正常清单里不显示（腐竹 2026-11-06：「正常排序模式不显示，搜索仍然显示」）。
+        // 例外 ①「不显示」编辑模式 = 得看见才能点回来；② 关键词搜索 = 一律显示，免得搜不到以为丢了。
+        boolean editingHidden = p != null && store.hideMode(p.getUniqueId());
+        boolean searching = mode == Mode.SEARCH || (keyword != null && !keyword.isEmpty());
+        if (p != null && !editingHidden && !searching) {
+            UUID uid = p.getUniqueId();
+            list.removeIf(k -> store.hidden(uid, k));
+        }
         if (sort == Sort.FAVORITE) {
             java.util.Set<ItemKey> favs = (p == null)
                     ? java.util.Set.of()
@@ -577,10 +649,42 @@ public final class ExchangeGui {
             list.removeIf(k -> !favs.contains(k));
         }
         switch (sort) {
-            case PRICE_ASC, FAVORITE -> list.sort(Comparator.comparingDouble(manager::buyUnit)
+            case NORMAL -> {
+                // 腐竹 2026-11-06：「正常排序，此排序顺序不作任何变化，新加入的就放第一位」
+                // 加入顺序 = sold 的插入序（最早→最近），倒过来就是「新的在前」，老条目位置永远不动。
+                if (p != null && !global) {
+                    List<ItemKey> mine = store.personal(p.getUniqueId());
+                    java.util.Map<ItemKey, Integer> rank = new java.util.HashMap<>();
+                    for (int i = 0; i < mine.size(); i++) rank.put(mine.get(i), mine.size() - 1 - i);
+                    list.sort(Comparator.comparingInt((ItemKey k) -> {
+                                Integer r = rank.get(k);
+                                return r == null ? Integer.MAX_VALUE : r;
+                            })
+                            .thenComparing(ItemKey::getDisplayName));
+                }
+            }
+            case HISTORY -> {
+                // 腐竹 2026-11-06：「历史排序就只显示今天操作过的物品即可」→ 只留今天（本地时区）成交过的
+                java.util.Map<ItemKey, Integer> rank = new java.util.HashMap<>();
+                if (p != null) {
+                    List<ItemKey> hist = store.historyToday(p.getUniqueId());
+                    for (int i = 0; i < hist.size(); i++) rank.put(hist.get(i), i);
+                    if (!global) list.removeIf(k -> !rank.containsKey(k));
+                }
+                list.sort(Comparator.comparingInt((ItemKey k) -> {
+                            Integer r = rank.get(k);
+                            return r == null ? Integer.MAX_VALUE : r;
+                        })
+                        .thenComparing(ItemKey::getDisplayName));
+            }
+            case FAVORITE -> list.sort(Comparator.comparingDouble(manager::buyUnit)
                     .thenComparing(ItemKey::getDisplayName));
-            default -> list.sort(Comparator.comparingDouble((ItemKey k) -> -manager.buyUnit(k))
-                    .thenComparing(ItemKey::getDisplayName));
+        }
+        // 已隐藏的挪到最后（腐竹 2026-11-06：编辑隐藏时界面别乱跳，隐藏的别把正常物品挤走）。
+        // List.sort 是稳定排序，前面的顺序不动，只做一次「非隐藏在前、隐藏在后」的分区。
+        if (p != null) {
+            UUID uid0 = p.getUniqueId();
+            list.sort(Comparator.comparingInt((ItemKey k) -> store.hidden(uid0, k) ? 1 : 0));
         }
         return list;
     }
@@ -634,6 +738,7 @@ public final class ExchangeGui {
             lore.add("§8来源: 基础价（定价表）");
         }
         if (p != null && store.sold(p.getUniqueId(), key)) lore.add("§8你卖过这个物品");
+        if (p != null && store.hidden(p.getUniqueId(), key)) lore.add("§c已隐藏 §8（正常清单里不显示）");
         lore.add("");
         lore.add("§e左键 §7换出 1 个 · §eShift+左键 §7数量");
         lore.add("§a右键 §7换入光标上的同类物品");
@@ -699,7 +804,19 @@ public final class ExchangeGui {
                         "§7视图: §f" + (st.mode == Mode.SEARCH ? "搜索结果（我的）" : "我的"),
                         "§8搜索只在自己的清单里",
                         "§8清单只靠卖东西一点点填起来");
-            case NAV_CLOSE -> GuiItems.of(Material.BARRIER, "§c关闭");
+            case NAV_HIDE -> {
+                boolean on = p != null && store.hideMode(p.getUniqueId());
+                int hidden = p == null ? 0 : store.hiddenKeys(p.getUniqueId()).size();
+                yield on
+                        ? GuiItems.of(Material.LIME_DYE, "§a隐藏物品: §f开",
+                            "§7点物品 = 把它从正常清单里藏起来（再点一次恢复）",
+                            "§7搜索时仍然能搜到",
+                            "§8已隐藏 " + hidden + " 件 · 再点本格关掉",
+                            "§8这是你自己的偏好，别人看不到")
+                        : GuiItems.of(Material.GRAY_DYE, "§7隐藏物品: §f关",
+                            "§7点一下开启「不显示物品」编辑模式",
+                            "§8已隐藏 " + hidden + " 件");
+            }
             default -> GuiItems.of(Material.GRAY_STAINED_GLASS_PANE, "§8—");
         };
     }

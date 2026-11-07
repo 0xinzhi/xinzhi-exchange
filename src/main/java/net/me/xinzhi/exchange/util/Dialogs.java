@@ -61,9 +61,36 @@ public final class Dialogs {
     public static void text(JavaPlugin plugin, Player p, String title, String label,
                             String initial, int maxLength,
                             Runnable onCancel, Consumer<String> onValue) {
+        text(plugin, p, title, label, initial, maxLength, null, onCancel, onValue);
+    }
+
+    /**
+     * 文本框 + 一排「历史记录」按键（腐竹 2026-11-06：「搜索增加历史搜索选项。可以保留5个。
+     * 用按键来区分5个搜索历史。注意同样的搜索历史不要重复显示。」）。
+     *
+     * <p>每个历史词一个整行按钮，点它 = 直接用这个词搜索（相当于填进输入框再点确定）。
+     * 老客户端（没有 Dialog）没有按键可用，只能把历史打在聊天栏里提示。
+     */
+    public static void text(JavaPlugin plugin, Player p, String title, String label,
+                            String initial, int maxLength, List<String> history,
+                            Runnable onCancel, Consumer<String> onValue) {
         if (!canDialog(p)) {
+            if (history != null && !history.isEmpty()) {
+                p.sendMessage("§7[搜索历史] §f" + String.join(" §8· §f", history));
+            }
             ChatInput.request(plugin, p, "§b" + label + " §7（输入 §fcancel §7取消）", onCancel, onValue);
             return;
+        }
+        java.util.List<ActionButton> extra = new java.util.ArrayList<>();
+        if (history != null) {
+            for (String kw : history) {
+                if (kw == null || kw.isBlank()) continue;
+                extra.add(ActionButton.create(legacy("§b⌕ " + kw), legacy("§8历史搜索"), WIDTH,
+                        DialogAction.customClick((response, audience) -> {
+                            if (audience instanceof Player who) who.closeDialog();
+                            runNext(plugin, () -> onValue.accept(kw));
+                        }, OPTIONS)));
+            }
         }
         show(plugin, p, title, label,
                 List.of(io.papermc.paper.registry.data.dialog.input.DialogInput.text(KEY, WIDTH, legacy(label), true,
@@ -74,7 +101,8 @@ public final class Dialogs {
                     return s == null ? "" : s.trim();
                 },
                 onValue,
-                onValue);
+                onValue,
+                extra);
     }
 
     // ============================================================
@@ -295,8 +323,30 @@ public final class Dialogs {
                 "§a确定", 120);
     }
 
+    private static <T> void show(JavaPlugin plugin, Player p, String title, String label,
+                                 List<io.papermc.paper.registry.data.dialog.input.DialogInput> inputs,
+                                 Runnable onCancel,
+                                 Function<DialogResponseView, T> reader,
+                                 Consumer<T> onValue,
+                                 Consumer<String> chatFallback,
+                                 java.util.List<ActionButton> extra) {
+        show(plugin, p, title, List.of(label), inputs, extra, onCancel, reader, onValue, chatFallback,
+                "§a确定", 120);
+    }
+
     private static <T> void show(JavaPlugin plugin, Player p, String title, List<String> body,
                                  List<io.papermc.paper.registry.data.dialog.input.DialogInput> inputs,
+                                 Runnable onCancel,
+                                 Function<DialogResponseView, T> reader,
+                                 Consumer<T> onValue,
+                                 Consumer<String> chatFallback,
+                                 String okLabel, int okWidth) {
+        show(plugin, p, title, body, inputs, null, onCancel, reader, onValue, chatFallback, okLabel, okWidth);
+    }
+
+    private static <T> void show(JavaPlugin plugin, Player p, String title, List<String> body,
+                                 List<io.papermc.paper.registry.data.dialog.input.DialogInput> inputs,
+                                 java.util.List<ActionButton> extraButtons,
                                  Runnable onCancel,
                                  Function<DialogResponseView, T> reader,
                                  Consumer<T> onValue,
@@ -338,7 +388,7 @@ public final class Dialogs {
                             .inputs(inputs)
                             .build())
                     // columns=1 = 按钮竖着排、各占一整行（大按键才撑得开）
-                    .type(DialogType.multiAction(List.of(ok), cancel, 1)));
+                    .type(DialogType.multiAction(buttons(extraButtons, ok), cancel, 1)));
             p.showDialog(dialog);
         } catch (Throwable t) {
             if (plugin != null) {
@@ -347,6 +397,14 @@ public final class Dialogs {
             ChatInput.request(plugin, p, "§b" + flat + " §7（输入 §fcancel §7取消）",
                     onCancel, chatFallback);
         }
+    }
+
+    private static List<ActionButton> buttons(java.util.List<ActionButton> extra, ActionButton ok) {
+        if (extra == null || extra.isEmpty()) return List.of(ok);
+        java.util.List<ActionButton> all = new java.util.ArrayList<>(extra.size() + 1);
+        all.addAll(extra);
+        all.add(ok);
+        return all;
     }
 
     /** 关框之后要重开界面：一律推到下一个 tick，避免被客户端吞掉 */

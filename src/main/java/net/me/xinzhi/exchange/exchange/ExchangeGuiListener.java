@@ -8,6 +8,7 @@ import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
 import org.bukkit.event.inventory.InventoryClickEvent;
+import org.bukkit.event.inventory.InventoryCloseEvent;
 import org.bukkit.event.inventory.InventoryDragEvent;
 import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.InventoryHolder;
@@ -38,6 +39,19 @@ public final class ExchangeGuiListener implements Listener {
         this.manager = manager;
         this.gui = gui;
         this.store = store;
+    }
+
+    /**
+     * 关掉主界面 = 退出「隐藏物品」编辑模式（腐竹 2026-11-06：每次打开都保持关闭）。
+     * 自己 reopen 时 Bukkit 也会发关闭事件，用 {@link ExchangeGui#internalOpen} 豁免。
+     */
+    @EventHandler(priority = EventPriority.MONITOR)
+    public void onClose(InventoryCloseEvent e) {
+        if (!(e.getView().getTopInventory().getHolder() instanceof ExchangeGui.MainHolder)) return;
+        if (!(e.getPlayer() instanceof Player p)) return;
+        java.util.UUID id = p.getUniqueId();
+        if (ExchangeGui.internalOpen(id)) return;
+        if (store.hideMode(id)) store.setHideMode(id, false);
     }
 
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = false)

@@ -62,6 +62,27 @@ public final class AutoBuyMachine extends AbstractMachine {
     /** 周期计数放内存，别写 BlockStorage（腐竹 2026-10-26：机器别频繁记录） */
     private final Map<Location, Integer> counters = new HashMap<>();
 
+    /**
+     * 模板区解析结果最多隔这么多个周期重算一次（腐竹 2026-10-30：「4 个周期内即可」）。
+     *
+     * <p>为什么要缓存：原来每个周期都要对 24 个模板各做一次 {@code ItemKey.of}，而真正贵的是
+     * 下面的输出格扫描。模板只可能在玩家动槽位 / 物流塞东西时变，4 个周期（默认 0.6 秒）内
+     * 一定能发现，人眼看不出来。
+     */
+    private static final int TPL_REFRESH_CYCLES = 4;
+    private final Map<Location, TplCache> tplCaches = new HashMap<>();
+    private final Map<Location, Integer> tplTicks = new HashMap<>();
+    /** 上周期画出去的状态：内容没变就不重画（省掉每次 2 个 CustomItemStack） */
+    private final Map<Location, String> lastRender = new HashMap<>();
+
+    /** 模板区解析结果：键为 TEMPLATES 的下标，空格 / 认不出的留 null */
+    private static final class TplCache {
+        final ItemKey[] keys = new ItemKey[TEMPLATES.length];
+        final ItemStack[] tpls = new ItemStack[TEMPLATES.length];
+        final int[] want = new int[TEMPLATES.length];
+        final int[] maxStack = new int[TEMPLATES.length];
+    }
+
     public AutoBuyMachine(ItemGroup group, SlimefunItemStack item,
                           RecipeType recipeType, ItemStack[] recipe) {
         super(group, item, recipeType, recipe);
@@ -104,6 +125,9 @@ public final class AutoBuyMachine extends AbstractMachine {
     @Override
     public void onMenuOpen(@Nonnull BlockMenu menu, @Nonnull Block b) {
         Location loc = b.getLocation();
+        // 玩家打开界面 = 正准备动模板：下个周期强制重解析模板区
+        tplCaches.remove(loc);
+        lastRender.remove(loc);
         menu.addMenuClickHandler(MIN, (p, slot, item, action) -> {
             UUID owner = MachineUtil.ownerOrClaim(loc, p);
             if (owner == null || !owner.equals(p.getUniqueId())) {
@@ -172,20 +196,44 @@ public final class AutoBuyMachine extends AbstractMachine {
             render(menu, loc, "§c未装等价道具，无法使用", 0);
             return;
         }
-        int bought = 0, skipped = 0;
-        for (int idx = 0; idx < TEMPLATES.length; idx++) {
-            ItemStack tpl = menu.getItemInSlot(TEMPLATES[idx]);
-            if (tpl == null || tpl.getType().isAir()) continue;
-            ItemKey k = ItemKey.of(tpl);
-            if (k == null) continue;
+        // 一次拿整块界面快照：原来 room()/give() 对每个模板各扫一遍输出格，24 模板 × 48 格 = 上千次单格读
+        ItemStack[] snap;
+        try {
+            snap = menu.getContents();
+        } catch (Throwable t) {
+            return;
+        }
+        if (snap == null) return;
 
-            int want = Math.max(1, tpl.getAmount());
+        // 模板区：最多每 TPL_REFRESH_CYCLES 个周期重解析一次（腐竹 2026-10-30「4 个周期内即可」）
+        TplCache cache = tplCaches.get(loc);
+        int tick = tplTicks.merge(loc, 1, Integer::sum);
+        if (cache == null || tick >= TPL_REFRESH_CYCLES) {
+            cache = parseTemplates(snap);
+            tplCaches.put(loc, cache);
+            tplTicks.put(loc, 0);
+        }
+
+        Out out = new Out(snap);
+        int bought = 0, skipped = 0;
+        for (int i = 0; i < TEMPLATES.length; i++) {
+            ItemKey k = cache.keys[i];
+            if (k == null) continue;                        // 空格 / 认不出的模板
+            ItemStack tpl = cache.tpls[i];
+            int want = cache.want[i];
+            int maxStack = cache.maxStack[i];
+            // 模板刚被拿走：缓存最多还活 4 个周期，这里拦一下，别在人家撤掉目标后还继续买
+            int tplSlot = TEMPLATES[i];
+            if (tplSlot >= snap.length) continue;
+            ItemStack live = snap[tplSlot];
+            if (live == null || live.getType().isAir()) continue;
+
             double raw = MachineUtil.buyUnit(loc, k);
             if (!(raw > 0)) continue;                       // 无价：跳过
-            if (TradeCap.blocks(cap, raw)) continue;   // 超道具上限：不买
+            if (TradeCap.blocks(cap, raw)) continue;        // 超道具上限：不买
             double unit = raw * (1 + MachineUtil.FEE);
 
-            int fit = room(menu, k, tpl, want);
+            int fit = out.room(k, maxStack, want);
             if (fit <= 0) {
                 skipped++;
                 continue;                                   // 输出装不下：跳过这一种
@@ -193,6 +241,7 @@ public final class AutoBuyMachine extends AbstractMachine {
 
             int affordable = (int) Math.floor((balance - min) / unit);
             if (affordable <= 0) {
+                out.flush(menu);
                 render(menu, loc, "§7余额不够买一个，待机", bought);
                 return;
             }
@@ -202,11 +251,29 @@ public final class AutoBuyMachine extends AbstractMachine {
             double cost = unit * qty;
             svc.manager().balances().add(owner, -cost);
             balance -= cost;
-            give(menu, k, tpl, qty);
+            out.give(k, tpl, maxStack, qty);
             bought += qty;
         }
+        out.flush(menu);
         if (bought > 0) render(menu, loc, "§a买入 " + bought + " 件", bought);
         else render(menu, loc, skipped > 0 ? "§7输出满了 / 都超上限，待机" : "§7没有可买的目标，待机", 0);
+    }
+
+    /** 把 24 个模板槽解析成缓存（只在 template 区真的可能变了的时候调） */
+    private static TplCache parseTemplates(ItemStack[] snap) {
+        TplCache c = new TplCache();
+        for (int i = 0; i < TEMPLATES.length; i++) {
+            int slot = TEMPLATES[i];
+            ItemStack tpl = slot < snap.length ? snap[slot] : null;
+            if (tpl == null || tpl.getType().isAir()) continue;
+            ItemKey k = ItemKey.of(tpl);
+            if (k == null) continue;
+            c.keys[i] = k;
+            c.tpls[i] = tpl;
+            c.want[i] = Math.max(1, tpl.getAmount());
+            c.maxStack[i] = Math.max(1, tpl.getMaxStackSize());
+        }
+        return c;
     }
 
     /** 13 槽没放等价道具 = 整台机器不能用（腐竹 m00819）；口径统一在 {@link MachineUtil#capOf} */
@@ -216,53 +283,88 @@ public final class AutoBuyMachine extends AbstractMachine {
         return MachineUtil.capOf(menu, CAP_SLOT);
     }
 
-    /** 输出槽还能放下多少个这种物品（同款先叠，再找空格） */
-    private static int room(BlockMenu menu, ItemKey k, ItemStack tpl, int max) {
-        int maxStack = Math.max(1, tpl.getMaxStackSize());
-        int room = 0;
-        for (int slot : OUTPUTS) {
-            ItemStack it = menu.getItemInSlot(slot);
-            if (it == null || it.getType().isAir()) {
-                room += maxStack;
-            } else if (same(k, it)) {
-                room += Math.max(0, maxStack - it.getAmount());
+    /**
+     * 输出区的本周期快照：{@code room()} 与 {@code give()} 都在这份本地副本上算，
+     * 最后只把真的动过的格子写回界面。
+     *
+     * <p>2026-10-30 提速：原来每处理一个模板就要重新 {@code getItemInSlot} 扫两遍 24 格
+     * （24 模板 × 48 格 ≈ 1150 次单格读），现在整块界面只读一次。
+     */
+    private static final class Out {
+
+        private final ItemStack[] items = new ItemStack[OUTPUTS.length];
+        private final boolean[] dirty = new boolean[OUTPUTS.length];
+        /** 界面长度不够（老机器 27 格）时，超出范围的槽当作不存在 */
+        private final int len;
+
+        Out(ItemStack[] snap) {
+            this.len = snap == null ? 0 : snap.length;
+            for (int i = 0; i < OUTPUTS.length; i++) {
+                items[i] = OUTPUTS[i] < len ? snap[OUTPUTS[i]] : null;
             }
-            if (room >= max) return max;
         }
-        return room;
-    }
 
-    private static void give(BlockMenu menu, ItemKey k, ItemStack tpl, int qty) {
-        int maxStack = Math.max(1, tpl.getMaxStackSize());
-        int left = qty;
-        // 先叠到同款上
-        for (int slot : OUTPUTS) {
-            if (left <= 0) return;
-            ItemStack it = menu.getItemInSlot(slot);
-            if (it == null || it.getType().isAir() || !same(k, it)) continue;
-            int add = Math.min(left, maxStack - it.getAmount());
-            if (add <= 0) continue;
-            ItemStack copy = it.clone();
-            copy.setAmount(it.getAmount() + add);
-            menu.replaceExistingItem(slot, copy);
-            left -= add;
+        /** 该格是不是「同款且原样」 */
+        private static boolean same(ItemKey k, ItemStack it) {
+            if (it == null || it.getType().isAir()) return false;
+            ItemKey other = ItemKey.of(it);
+            // 没有 ItemMeta 的原版物品必然是原样，省一次模板深比较
+            return other != null && other.equals(k) && (!it.hasItemMeta() || ItemGuard.pristine(k, it));
         }
-        // 再放空格
-        for (int slot : OUTPUTS) {
-            if (left <= 0) return;
-            ItemStack it = menu.getItemInSlot(slot);
-            if (it != null && !it.getType().isAir()) continue;
-            int add = Math.min(left, maxStack);
-            ItemStack copy = tpl.clone();
-            copy.setAmount(add);
-            menu.replaceExistingItem(slot, copy);
-            left -= add;
-        }
-    }
 
-    private static boolean same(ItemKey k, ItemStack it) {
-        ItemKey other = ItemKey.of(it);
-        return other != null && other.equals(k) && ItemGuard.pristine(k, it);
+        /** 输出槽还能放下多少个这种物品（同款先叠，再找空格） */
+        int room(ItemKey k, int maxStack, int max) {
+            int room = 0;
+            for (int i = 0; i < items.length; i++) {
+                if (OUTPUTS[i] >= len) continue;
+                ItemStack it = items[i];
+                if (it == null || it.getType().isAir()) {
+                    room += maxStack;
+                } else if (same(k, it)) {
+                    room += Math.max(0, maxStack - it.getAmount());
+                }
+                if (room >= max) return max;
+            }
+            return room;
+        }
+
+        void give(ItemKey k, ItemStack tpl, int maxStack, int qty) {
+            int left = qty;
+            // 先叠到同款上
+            for (int i = 0; i < items.length && left > 0; i++) {
+                if (OUTPUTS[i] >= len) continue;
+                ItemStack it = items[i];
+                if (it == null || it.getType().isAir() || !same(k, it)) continue;
+                int add = Math.min(left, maxStack - it.getAmount());
+                if (add <= 0) continue;
+                ItemStack copy = it.clone();
+                copy.setAmount(it.getAmount() + add);
+                items[i] = copy;
+                dirty[i] = true;
+                left -= add;
+            }
+            // 再放空格
+            for (int i = 0; i < items.length && left > 0; i++) {
+                if (OUTPUTS[i] >= len) continue;
+                ItemStack it = items[i];
+                if (it != null && !it.getType().isAir()) continue;
+                int add = Math.min(left, maxStack);
+                ItemStack copy = tpl.clone();
+                copy.setAmount(add);
+                items[i] = copy;
+                dirty[i] = true;
+                left -= add;
+            }
+        }
+
+        /** 只写回动过的格子 */
+        void flush(BlockMenu menu) {
+            for (int i = 0; i < dirty.length; i++) {
+                if (!dirty[i]) continue;
+                menu.replaceExistingItem(OUTPUTS[i], items[i]);
+                dirty[i] = false;
+            }
+        }
     }
 
     private void render(BlockMenu menu, Location loc, String status, int bought) {
@@ -273,6 +375,11 @@ public final class AutoBuyMachine extends AbstractMachine {
         double min = MachineUtil.doubleInfo(loc, "xz-min",
                 svc == null ? 0 : svc.config().machineBuyMinBalance);
         long cap = capOf(menu);
+        // 内容没变就不重画（腐竹 2026-10-30 降载）：省掉每周期 2 个带 lore 的 CustomItemStack
+        String ownerName = MachineUtil.ownerName(owner);
+        String key = cap + "|" + status + "|" + bought + "|" + balance + "|" + min + "|" + ownerName;
+        if (key.equals(lastRender.get(loc))) return;
+        lastRender.put(loc, key);
         try {
             if (cap == CAP_MISSING) {
                 ItemStack s13 = menu.getItemInSlot(CAP_SLOT);
@@ -289,6 +396,7 @@ public final class AutoBuyMachine extends AbstractMachine {
             menu.replaceExistingItem(MIN, new CustomItemStack(Material.GOLD_INGOT,
                     "§6输入阈值 §f" + fmt(min),
                     "§6机主余额 §f" + fmt(balance),
+                    "§7机主 §f" + ownerName,
                     "§7点击输入阈值（只有机主能改）"));
         } catch (Throwable ignored) {
         }

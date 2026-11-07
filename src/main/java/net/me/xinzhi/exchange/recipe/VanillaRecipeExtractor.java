@@ -99,6 +99,43 @@ public final class VanillaRecipeExtractor {
 
     public static int size() { return collected().size(); }
 
+    /** 丢掉快照：其它附属可能在我们之后才 removeRecipe + addRecipe（实测 LogiTech 就这么干），快照会过期 */
+    public static synchronized void invalidate() { cache = null; }
+
+    /** 重新扫一遍并补注册（幂等，同指纹不会重复）；返回新注册条数 */
+    public static synchronized int refresh(RecipeRegistry registry) {
+        cache = null;
+        return ensureRegistered(registry);
+    }
+
+    /** 最近一次转换卡在哪（诊断用，只在主线程诊断命令里写） */
+    private static volatile String lastWhy;
+
+    /** 单条配方的转换结果（诊断用，永不抛异常） */
+    public static String describe(org.bukkit.inventory.Recipe r) {
+        if (r == null) return "null";
+        try {
+            List<Recipe> one = new ArrayList<>();
+            lastWhy = null;
+            convert(r, one);
+            if (!one.isEmpty()) return "转换成功 " + one.size() + " 条变体";
+            String w = lastWhy;
+            StringBuilder sb = new StringBuilder("转换出 0 条（");
+            sb.append(w == null ? "类型不支持" : w).append(')');
+            if (r instanceof ShapedRecipe sh) {
+                try {
+                    sb.append(" shape=").append(String.join("/", sh.getShape()))
+                      .append(" choiceChars=").append(sh.getChoiceMap().keySet())
+                      .append(" legacyChars=").append(sh.getIngredientMap().keySet());
+                } catch (Throwable ignored) {
+                }
+            }
+            return sb.toString();
+        } catch (Throwable t) {
+            return "转换异常 " + t.getClass().getSimpleName() + ": " + t.getMessage();
+        }
+    }
+
     // ============================================================
 
     private static void convert(org.bukkit.inventory.Recipe r, List<Recipe> out) {
@@ -130,11 +167,18 @@ public final class VanillaRecipeExtractor {
         // 交易 / 数据包自定义配方 / 修剪锻造：没有稳定的材料→产物关系，跳过
     }
 
+    @SuppressWarnings("deprecation")
     private static void convertShaped(ShapedRecipe s, List<Recipe> out) {
         ItemKey result = key(s.getResult());
-        if (result == null) return;
+        if (result == null) {
+            lastWhy = "产物认不出（" + s.getResult() + "）";
+            return;
+        }
         String[] shape = s.getShape();
         Map<Character, RecipeChoice> choices = s.getChoiceMap();
+        // ⚠ 有的附属用老 API setIngredient(char, Material) 建配方，
+        //   这种配方 getChoiceMap() 里查不到，只在 getIngredientMap() 里有（LogiTech 实测）
+        Map<Character, ItemStack> legacy = null;
         Map<Character, Integer> counts = new LinkedHashMap<>();
         for (String row : shape) {
             for (int i = 0; i < row.length(); i++) {
@@ -143,11 +187,28 @@ public final class VanillaRecipeExtractor {
                 counts.merge(ch, 1, Integer::sum);
             }
         }
+        if (counts.isEmpty()) {
+            lastWhy = "shape 里没有材料字符";
+            return;
+        }
         List<List<ItemKey>> opts = new ArrayList<>();
         List<Integer> amounts = new ArrayList<>();
         for (Map.Entry<Character, Integer> e : counts.entrySet()) {
-            List<ItemKey> o = options(choices.get(e.getKey()));
-            if (o.isEmpty()) return;
+            char ch = e.getKey();
+            List<ItemKey> o = options(choices.get(ch));
+            if (o.isEmpty()) {
+                if (legacy == null) legacy = s.getIngredientMap();
+                o = optionsOf(legacy.get(ch));
+            }
+            if (o.isEmpty()) {
+                // 空格子：有些附属（LogiTech 实测）把配方建成「一个槽一个字符、空槽的 choice 为 null」，
+                //   形状是满 9 格的 abc/def/ghi，空槽不是 ' ' 而是普通字符。这种必须跳过，不能判成材料认不出。
+                ItemStack at = legacy == null ? null : legacy.get(ch);
+                if (choices.get(ch) == null && (at == null || at.getType().isAir())) continue;
+                lastWhy = "材料格 '" + ch + "' 认不出（choice="
+                        + (choices.get(ch) == null ? "无" : choices.get(ch).getClass().getSimpleName()) + "）";
+                return;
+            }
             opts.add(o);
             amounts.add(e.getValue());
         }
@@ -162,7 +223,10 @@ public final class VanillaRecipeExtractor {
         List<Integer> amounts = new ArrayList<>();
         for (RecipeChoice ch : s.getChoiceList()) {
             List<ItemKey> o = options(ch);
-            if (o.isEmpty()) return;
+            if (o.isEmpty()) {
+                lastWhy = "材料认不出（" + (ch == null ? "null" : ch.getClass().getSimpleName()) + "）";
+                return;
+            }
             opts.add(o);
             amounts.add(1);
         }
@@ -174,7 +238,10 @@ public final class VanillaRecipeExtractor {
                                       String source, int ticks, List<Recipe> out) {
         ItemKey res = key(result);
         List<ItemKey> o = options(in);
-        if (res == null || o.isEmpty() || machine == null) return;
+        if (res == null || o.isEmpty() || machine == null) {
+            lastWhy = res == null ? "产物认不出" : (o.isEmpty() ? "输入认不出" : "机器为 null");
+            return;
+        }
         List<List<ItemKey>> opts = new ArrayList<>();
         List<Integer> amounts = new ArrayList<>();
         opts.add(o);
@@ -237,6 +304,11 @@ public final class VanillaRecipeExtractor {
         if (m == null || m.isAir() || !m.isItem()) return null;
         if (PriceBook.isTechnical(m)) return null;
         return ItemKey.vanilla(m);
+    }
+
+    private static List<ItemKey> optionsOf(ItemStack is) {
+        ItemKey k = key(is);
+        return k == null ? List.of() : List.of(k);
     }
 
     private static List<ItemKey> options(RecipeChoice choice) {

@@ -143,6 +143,27 @@ public final class ExchangeManager {
     public void addBalance(UUID id, double delta) { balances.add(id, delta); }
 
     // ============================================================
+    // 成交回调（腐竹 2026-11-06：「历史买卖」排序要知道玩家最近买卖过什么）
+    // ============================================================
+
+    /** 成交后通知（买 / 卖都算）；由 ExchangeService 接到 PlayerViewStore 上 */
+    private volatile java.util.function.BiConsumer<UUID, ItemKey> tradeHook;
+
+    public void tradeHook(java.util.function.BiConsumer<UUID, ItemKey> hook) {
+        this.tradeHook = hook;
+    }
+
+    private void traded(UUID id, ItemKey key) {
+        java.util.function.BiConsumer<UUID, ItemKey> h = tradeHook;
+        if (h == null || id == null || key == null) return;
+        try {
+            h.accept(id, key);
+        } catch (Throwable ignored) {
+            // 记历史失败绝不能影响成交本身
+        }
+    }
+
+    // ============================================================
     // 换出：价值 → 物品
     // ============================================================
 
@@ -183,6 +204,7 @@ public final class ExchangeManager {
             left -= give;
         }
         player.updateInventory();
+        traded(player.getUniqueId(), key);
 
         return ExchangeResult.ok(amount, unit, total);
     }
@@ -251,6 +273,8 @@ public final class ExchangeManager {
 
         double total = unit * take;
         addBalance(player.getUniqueId(), total);
+        ItemKey sold = ItemKey.of(current);
+        if (sold != null) traded(player.getUniqueId(), sold);
         return ExchangeResult.ok(take, unit, total);
     }
 
@@ -283,10 +307,9 @@ public final class ExchangeManager {
 
         double total = unit * take;
         addBalance(player.getUniqueId(), total);
+        traded(player.getUniqueId(), key);
         return ExchangeResult.ok(take, unit, total);
     }
-
-    // ============================================================
 
     // ============================================================
     // 换出：材料抵扣（腐竹 2026-10-19）
@@ -440,6 +463,7 @@ public final class ExchangeManager {
             left -= give;
         }
         p.updateInventory();
+        traded(p.getUniqueId(), key);
         return ExchangeResult.ok(amount, q.unit, q.remainder);
     }
 

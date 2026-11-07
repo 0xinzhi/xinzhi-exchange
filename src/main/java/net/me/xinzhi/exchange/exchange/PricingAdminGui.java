@@ -3,6 +3,7 @@ package net.me.xinzhi.exchange.exchange;
 import net.me.xinzhi.exchange.core.ItemKey;
 import net.me.xinzhi.exchange.price.PriceEngine;
 import net.me.xinzhi.exchange.recipe.Recipe;
+import net.me.xinzhi.exchange.recipe.RecipeExtractor;
 import net.me.xinzhi.exchange.recipe.VanillaRecipes;
 import net.me.xinzhi.exchange.util.Dialogs;
 import net.me.xinzhi.exchange.util.GuiItems;
@@ -87,7 +88,15 @@ public final class PricingAdminGui {
     public static final int F_SLIMEFUN = 16;
     /** 原版·无配方（腐竹 2026-10-29）：拿不到任何原版配方，价只能手工给 */
     public static final int F_NORECIPE = 18;
-    public static final int F_BACK = 22;
+    /** 原版 · 没有配方 **并且** 没有定价（腐竹 2026-11-06 第 1 条） */
+    public static final int F_VANILLA_NOPRICE = 20;
+    /** 粘液 · 没有配方 **并且** 没有定价 */
+    public static final int F_SF_NOPRICE = 21;
+    /** 原版 · 还没有定价（不看有没有配方，腐竹 2026-11-07） */
+    public static final int F_VANILLA_UNPRICED = 22;
+    /** 粘液 · 还没有定价（不看有没有配方） */
+    public static final int F_SF_UNPRICED = 23;
+    public static final int F_BACK = 26;
 
     private final ExchangeService svc;
     private final Map<UUID, LinkedHashMap<ItemKey, Double>> sessions = new ConcurrentHashMap<>();
@@ -309,6 +318,28 @@ public final class PricingAdminGui {
                 "§7价只能手工给 —— 整张原版价图的根",
                 "§8共 §f" + noRecipe.size() + " §8个",
                 "§7点一下全部进清单"));
+        inv.setItem(F_VANILLA_NOPRICE, GuiItems.of(Material.BOOK,
+                "§6🔍 原版·无配方未定价",
+                "§7原版配方也做不出来、又还没有价的物品",
+                "§7这些是原版价图里真正的地基",
+                "§8共 §f" + countVanillaNoPrice() + " §8个",
+                "§7点一下全部进清单"));
+        inv.setItem(F_SF_NOPRICE, GuiItems.of(Material.SLIME_BALL,
+                "§6🔍 粘液·无配方未定价",
+                "§7粘液科技物品里没有自身合成配方、又还没有价的",
+                "§8共 §f" + countSfNoPrice() + " §8个",
+                "§7点一下全部进清单"));
+        inv.setItem(F_VANILLA_UNPRICED, GuiItems.of(Material.BOOKSHELF,
+                "§c🔍 原版·未定价",
+                "§7所有还没有价的原始材质（不看有没有配方）",
+                "§7原版不再有「无价兜底 = 1」，所以这里就是真正的地基缺口",
+                "§8共 §f" + countVanillaUnpriced() + " §8个",
+                "§7点一下全部进清单"));
+        inv.setItem(F_SF_UNPRICED, GuiItems.of(Material.MAGMA_CREAM,
+                "§c🔍 粘液·未定价",
+                "§7所有还没有价的粘液科技物品（不看去配方）",
+                "§8共 §f" + countSfUnpriced() + " §8个",
+                "§7点一下全部进清单"));
         inv.setItem(F_BACK, GuiItems.of(Material.BARRIER, "§c返回"));
         p.openInventory(inv);
     }
@@ -451,6 +482,42 @@ public final class PricingAdminGui {
                 if (k == null) continue;
                 if (s.putIfAbsent(k, null) == null) added++;
             }
+        } else if (kind == 5) {       // 原版·无配方·未定价（腐竹 2026-11-06）
+            for (Material m : VanillaRecipes.withoutRecipe()) {
+                ItemKey k = ItemKey.vanilla(m);
+                if (k == null) continue;
+                if (svc.engine().hasPrice(k)) continue;
+                if (s.putIfAbsent(k, null) == null) added++;
+            }
+        } else if (kind == 6) {       // 粘液·无配方·未定价（腐竹 2026-11-06）
+            try {
+                for (var item : io.github.thebusybiscuit.slimefun4.implementation.Slimefun
+                        .getRegistry().getAllSlimefunItems()) {
+                    ItemKey k = ItemKey.of(item);
+                    if (k == null) continue;
+                    if (svc.engine().hasPrice(k)) continue;
+                    if (RecipeExtractor.ownRecipe(item, k) != null) continue;
+                    if (s.putIfAbsent(k, null) == null) added++;
+                }
+            } catch (Throwable ignored) {}
+        } else if (kind == 7) {       // 原版·未定价（腐竹 2026-11-07：兜底 1.0 已删，这批才是真缺口）
+            for (Material m : Material.values()) {
+                if (!m.isItem() || m.isAir()) continue;
+                ItemKey k = ItemKey.vanilla(m);
+                if (k == null) continue;
+                if (svc.engine().hasPrice(k)) continue;
+                if (s.putIfAbsent(k, null) == null) added++;
+            }
+        } else if (kind == 8) {       // 粘液·未定价（腐竹 2026-11-07）
+            try {
+                for (var item : io.github.thebusybiscuit.slimefun4.implementation.Slimefun
+                        .getRegistry().getAllSlimefunItems()) {
+                    ItemKey k = ItemKey.of(item);
+                    if (k == null) continue;
+                    if (svc.engine().hasPrice(k)) continue;
+                    if (s.putIfAbsent(k, null) == null) added++;
+                }
+            } catch (Throwable ignored) {}
         } else {                      // 粘液
             try {
                 for (var item : io.github.thebusybiscuit.slimefun4.implementation.Slimefun
@@ -463,6 +530,51 @@ public final class PricingAdminGui {
         }
         openBatch(p, 0);
         p.sendMessage("§7筛选加入 " + added + " 个物品（清单共 " + s.size() + " 个）");
+    }
+
+    private int countVanillaNoPrice() {
+        int n = 0;
+        for (Material m : VanillaRecipes.withoutRecipe()) {
+            ItemKey k = ItemKey.vanilla(m);
+            if (k != null && !svc.engine().hasPrice(k)) n++;
+        }
+        return n;
+    }
+
+    private int countVanillaUnpriced() {
+        int n = 0;
+        for (Material m : Material.values()) {
+            if (!m.isItem() || m.isAir()) continue;
+            ItemKey k = ItemKey.vanilla(m);
+            if (k != null && !svc.engine().hasPrice(k)) n++;
+        }
+        return n;
+    }
+
+    private int countSfNoPrice() {
+        int n = 0;
+        try {
+            for (var item : io.github.thebusybiscuit.slimefun4.implementation.Slimefun
+                    .getRegistry().getAllSlimefunItems()) {
+                ItemKey k = ItemKey.of(item);
+                if (k == null || svc.engine().hasPrice(k)) continue;
+                if (RecipeExtractor.ownRecipe(item, k) != null) continue;
+                n++;
+            }
+        } catch (Throwable ignored) { }
+        return n;
+    }
+
+    private int countSfUnpriced() {
+        int n = 0;
+        try {
+            for (var item : io.github.thebusybiscuit.slimefun4.implementation.Slimefun
+                    .getRegistry().getAllSlimefunItems()) {
+                ItemKey k = ItemKey.of(item);
+                if (k != null && !svc.engine().hasPrice(k)) n++;
+            }
+        } catch (Throwable ignored) { }
+        return n;
     }
 
     private LinkedHashSet<ItemKey> allKnownKeys() {
