@@ -873,12 +873,43 @@ public final class ExchangeGui {
                             + r.getOutputs().getOrDefault(target, 1) + " 个",
                     "§8机器: " + r.getMachine().getDisplayName()));
         } else {
-            inv.setItem(SLOT_DETAIL_MACHINE, GuiItems.of(Material.NAME_TAG,
-                    "§7基础价物品",
-                    "§8价格来自 pricing 表（基础定价），不由配方推导"));
+            // 没有配方可以展示：来源要分开说清楚（腐竹 2026-11-08「为什么这台机器显示是基础定价」），
+            // 机器本身是建表时先垫的引导种子，不是定价表里的锚点。
+            PriceEngine.Origin org = dv == null ? null : dv.origin;
+            String title;
+            String[] detail;
+            if (org == PriceEngine.Origin.RECIPE) {
+                title = "§7机器引导价";
+                detail = new String[]{"§8这台机器自己没算出配方价，建表时先垫了种子"};
+            } else if (org == PriceEngine.Origin.GEO) {
+                title = "§7地理资源默认价";
+                detail = new String[]{"§8没有合成配方，按配置补的默认价"};
+            } else if (org == PriceEngine.Origin.DROP) {
+                title = "§7生物掉落兜底价";
+                detail = new String[]{"§8配方链算不出，按掉落概率补的价"};
+            } else if (org == PriceEngine.Origin.PALETTE) {
+                title = "§7同色变体统一价";
+                detail = new String[]{"§8整个颜色族取同一个价"};
+            } else if (org == PriceEngine.Origin.ANCHOR) {
+                title = "§7基础价物品";
+                detail = new String[]{"§8价格来自 pricing 表（基础定价 / 手工价），不由配方推导"};
+            } else {
+                title = "§7没有价";
+                detail = new String[]{"§8材料链算不通，也没有手工价"};
+            }
+            List<String> lore = new ArrayList<>();
+            lore.add("§7单价: §e" + Text.num(price));
+            lore.addAll(java.util.Arrays.asList(detail));
+            inv.setItem(SLOT_DETAIL_MACHINE, GuiItems.of(Material.NAME_TAG, title, lore));
             inv.setItem(SLOT_DETAIL_PRICE, GuiItems.of(Material.GOLD_INGOT,
                     "§6单价: §e" + Text.num(price),
-                    "§7来源: 基础定价表 / 手工价"));
+                    "§7来源: " + (org == null ? "§8无" : switch (org) {
+                        case ANCHOR -> "§f基础定价表 / 手工价";
+                        case RECIPE -> "§f机器引导价（机器本身没算出价）";
+                        case GEO -> "§f地理资源默认价";
+                        case DROP -> "§f生物掉落兜底价";
+                        case PALETTE -> "§f同色变体统一价";
+                    })));
         }
 
         if (dv != null && dv.recipe != null) {

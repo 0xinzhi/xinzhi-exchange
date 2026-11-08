@@ -459,6 +459,9 @@ public final class ExchangeCommand implements CommandExecutor, TabCompleter {
         } else if (dv.origin == PriceEngine.Origin.PALETTE) {
             s.sendMessage("§7来源: §f同色变体统一价 §8（全族取同一个价，"
                     + svc.config().paletteUnify + "；/xzex set 可覆盖）");
+        } else if (dv.recipe == null || dv.machine == null) {
+            s.sendMessage("§7来源: §f机器引导价 §8（这台机器自己没算出配方价，"
+                    + "建价格表时先垫了种子 " + Text.num(v) + "；/xzex set 可覆盖）");
         } else {
             s.sendMessage("§7来源: §f配方推导 §8（机器: " + dv.machine.getDisplayName() + "）");
             Recipe r = dv.recipe;

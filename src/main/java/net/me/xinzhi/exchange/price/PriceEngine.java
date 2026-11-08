@@ -305,8 +305,12 @@ public final class PriceEngine {
 
         // 0) 机器引导：先把「当机器用的那些物品」的价算出来，再按正常门槛跑
         machineBootstrapped = 0;
+        // 引导价连「机器自己那张配方」一起带出来：否则机器物品的溯源只剩 recipe=null，
+        // 界面上会被当成「基础定价」、/xzex price 还会在 dv.machine 上空指针（腐竹 2026-11-08）。
+        Map<ItemKey, Derivation> machineSeedDer = new HashMap<>(64);
         Map<ItemKey, Double> machineSeed = machineBootstrap
-                ? bootstrapMachines(all, gate, anchors, geoDefaults, dropDefaults) : Map.of();
+                ? bootstrapMachines(all, gate, anchors, geoDefaults, dropDefaults, machineSeedDer)
+                : Map.of();
         machineBootstrapped = machineSeed.size();
 
         // 1~1.7) 锚点 / 地理默认 → 配方推导，⭐ 严格按附属读取顺序迭代（见 orderForcedPrices）
@@ -330,7 +334,7 @@ public final class PriceEngine {
             }
             fillGeo(normal, normalDer, geoDefaults);
             seedDrops(normal, normalDer, dropDefaults);          // ⭐ 掉落价先当种子，让下游配方能算出来
-            seedMachinePrices(normal, normalDer, machineSeed);   // ⭐ 机器引导价：让它们的配方能参与报价
+            seedMachinePrices(normal, normalDer, machineSeed, machineSeedDer);   // ⭐ 机器引导价：让它们的配方能参与报价
             buildAll(all, staged, tier, gate, normal, normalDer);
             if (staged) { normalStage1 = stage1Count; normalStage2 = stage2Count; }
 
@@ -385,7 +389,7 @@ public final class PriceEngine {
             fillAnchors(sell, sellDer, sellAnchors);
             fillGeo(sell, sellDer, geoDefaults);
             seedDrops(sell, sellDer, dropDefaults);
-            seedMachinePrices(sell, sellDer, machineSeed);
+            seedMachinePrices(sell, sellDer, machineSeed, machineSeedDer);
             for (Map.Entry<ItemKey, Double> e : forced.entrySet()) sell.putIfAbsent(e.getKey(), e.getValue());
             buildAll(all, staged, tier, gate, sell, sellDer);
             sell.replaceAll((k, v) -> {
@@ -685,7 +689,8 @@ public final class PriceEngine {
     private Map<ItemKey, Double> bootstrapMachines(List<Recipe> all, Predicate<ItemKey> gate,
                                                    Map<ItemKey, Double> anchors,
                                                    Map<ItemKey, Double> geoDefaults,
-                                                   Map<ItemKey, Double> dropDefaults) {
+                                                   Map<ItemKey, Double> dropDefaults,
+                                                   Map<ItemKey, Derivation> seedDer) {
         Set<ItemKey> machines = new HashSet<>(64);
         for (Recipe r : all) {
             ItemKey m = r.getMachine();
@@ -701,19 +706,27 @@ public final class PriceEngine {
         Map<ItemKey, Double> out = new LinkedHashMap<>();
         for (ItemKey m : machines) {
             Double v = tmp.get(m);
-            if (v != null && v > 0) out.put(m, v);
+            if (v == null || !(v > 0)) continue;
+            out.put(m, v);
+            Derivation d = tmpDer.get(m);
+            if (seedDer != null && d != null) seedDer.put(m, d);
         }
         return out;
     }
 
     /** 把机器引导价塞进价表（只补空缺：真实锚点 / 已定的价优先） */
     private void seedMachinePrices(Map<ItemKey, Double> pm, Map<ItemKey, Derivation> dm,
-                                   Map<ItemKey, Double> machineSeed) {
+                                   Map<ItemKey, Double> machineSeed,
+                                   Map<ItemKey, Derivation> machineSeedDer) {
         if (machineSeed == null || machineSeed.isEmpty()) return;
         for (Map.Entry<ItemKey, Double> e : machineSeed.entrySet()) {
             if (pm.containsKey(e.getKey())) continue;
             pm.put(e.getKey(), e.getValue());
-            dm.put(e.getKey(), new Derivation(Origin.RECIPE, e.getValue(), null));
+            // 有机器自己的配方就照实挂上（溯源能显示"哪台机器做的"）；
+            // 算不出配方的机器（如整机只有别的机器参与）才留 recipe=null，标成「机器引导价」。
+            Derivation d = machineSeedDer == null ? null : machineSeedDer.get(e.getKey());
+            Recipe r = d == null ? null : d.recipe;
+            dm.put(e.getKey(), new Derivation(Origin.RECIPE, e.getValue(), r));
         }
     }
 
